@@ -1,0 +1,61 @@
+export const agentTemplates = [
+  {
+    templateID: 'planner',
+    name: 'Planner Agent',
+    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=planner',
+    provider: 'openai',
+    defaultEndpoint: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    defaultSystemPrompt: 'You are a planning agent. Break user goals into clear, verifiable steps.',
+    defaultToolIDs: ['get_current_time', 'read_conversation_messages', 'send_im_message'],
+    description: 'Breaks goals into plans and coordinates follow-up work.',
+    tags: ['planning', 'workflow'],
+    status: 'active',
+  },
+  {
+    templateID: 'coder',
+    name: 'Coder Agent',
+    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=coder',
+    provider: 'openai',
+    defaultEndpoint: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    defaultSystemPrompt: 'You are a coding agent. Prefer small, tested changes and explain tradeoffs clearly.',
+    defaultToolIDs: ['get_current_time', 'read_conversation_messages'],
+    description: 'Helps with code analysis, implementation planning, and controlled edits.',
+    tags: ['coding', 'review'],
+    status: 'active',
+  },
+  {
+    templateID: 'chatgpt',
+    name: 'ChatGPT',
+    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=chatgpt',
+    provider: 'openai',
+    defaultEndpoint: 'https://api.openai.com/v1',
+    defaultModel: 'gpt-4o-mini',
+    defaultSystemPrompt: 'You are a helpful assistant. Be concise and accurate.',
+    defaultToolIDs: ['get_current_time'],
+    description: 'General-purpose conversational assistant.',
+    tags: ['general'],
+    status: 'active',
+  },
+  {
+    templateID: 'claude-code',
+    name: 'Claude Code',
+    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=claude-code',
+    provider: 'anthropic',
+    defaultModel: 'claude-sonnet-4-5',
+    defaultSystemPrompt: 'You are a careful coding assistant. Ask for approval before destructive actions.',
+    defaultToolIDs: ['get_current_time', 'read_conversation_messages'],
+    description: 'Coding-oriented template for future Anthropic-compatible providers.',
+    tags: ['coding', 'anthropic'],
+    status: 'active',
+  },
+];
+
+export function listActiveTemplates() {
+  return agentTemplates.filter((template) => template.status === 'active');
+}
+
+export function getTemplate(templateID) {
+  return listActiveTemplates().find((template) => template.templateID === templateID);
+}

@@ -1,0 +1,27 @@
+import { readFileSync } from 'node:fs';
+
+export function loadConfig() {
+  const arkFromFile = loadArkTokenFile();
+  return {
+    port: parseInt(process.env.CHATBOT_HOST_PORT || '3100', 10),
+    imServerBaseURL: process.env.IM_SERVER_BASE_URL || 'http://localhost:3000',
+    storageDir: process.env.CHATBOT_HOST_STORAGE_DIR || new URL('../data/', import.meta.url).pathname,
+    ark: {
+      baseURL: process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3',
+      apiKey: process.env.ARK_API_KEY || arkFromFile.apiKey,
+      model: process.env.ARK_MODEL || arkFromFile.model,
+    },
+  };
+}
+
+function loadArkTokenFile() {
+  try {
+    const path = new URL('../../token', import.meta.url);
+    const raw = readFileSync(path, 'utf8');
+    const apiKey = raw.split(/\r?\n/).find((line) => line.trim().startsWith('ark-'))?.trim() || '';
+    const model = raw.match(/EP[:：]\s*([^\s]+)/)?.[1] || '';
+    return { apiKey, model };
+  } catch {
+    return { apiKey: '', model: '' };
+  }
+}
