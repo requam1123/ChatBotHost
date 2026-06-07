@@ -191,7 +191,7 @@ function buildSystemPrompt(agent, enabledTools) {
   if (enabledTools.length === 0) return base;
   return `${base}
 
-You may call the provided tools when they are useful. Use get_current_time for current time questions. Use read_conversation_messages only when conversation context is needed. Do not call send_im_message unless the user explicitly asks you to send a separate IM message; normal answers should be returned as assistant text.`;
+You may call the provided tools when they are useful. Use get_current_time for current time questions. Use read_conversation_messages only when conversation context is needed. Use delegate_to_agent when a task should be handled by a more suitable specialist agent; prefer templateID such as "coder", "planner", or "chatgpt" if the exact agentUserID is unknown. After a delegated agent returns, synthesize the result into your final answer. Do not call send_im_message unless the user explicitly asks you to send a separate IM message; normal answers should be returned as assistant text.`;
 }
 
 function buildMockReply(agent, event) {

@@ -7,7 +7,7 @@ export const agentTemplates = [
     defaultEndpoint: 'https://api.openai.com/v1',
     defaultModel: 'gpt-4o-mini',
     defaultSystemPrompt: 'You are a planning agent. Break user goals into clear, verifiable steps.',
-    defaultToolIDs: ['get_current_time', 'read_conversation_messages', 'send_im_message'],
+    defaultToolIDs: ['get_current_time', 'read_conversation_messages', 'delegate_to_agent'],
     description: 'Breaks goals into plans and coordinates follow-up work.',
     tags: ['planning', 'workflow'],
     status: 'active',

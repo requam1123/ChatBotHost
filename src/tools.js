@@ -46,6 +46,26 @@ export const toolCatalog = [
     enabled: true,
   },
   {
+    toolID: 'delegate_to_agent',
+    name: 'Delegate To Agent',
+    description: 'Delegate a task to another agent owned by the same user and return the worker result.',
+    category: 'external_api',
+    riskLevel: 'medium',
+    source: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentUserID: { type: 'string' },
+        templateID: { type: 'string' },
+        task: { type: 'string' },
+        context: { type: 'string' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    enabled: true,
+  },
+  {
     toolID: 'workspace_read',
     name: 'Workspace Read',
     description: 'Read files from a scoped agent workspace.',
@@ -134,6 +154,8 @@ export async function executeToolCall(toolID, args, context) {
       return readConversationMessages(args, context);
     case 'send_im_message':
       return sendImMessage(args, context);
+    case 'delegate_to_agent':
+      return delegateToAgent(args, context);
     default:
       return { ok: false, error: `Tool is not implemented: ${toolID}` };
   }
@@ -187,6 +209,19 @@ async function sendImMessage(args, context) {
     serverMsgID: sent.serverMsgID,
     conversationID: sent.conversationID || context.event.conversationID,
   };
+}
+
+async function delegateToAgent(args, context) {
+  const task = typeof args.task === 'string' ? args.task.trim() : '';
+  if (!task) return { ok: false, error: 'task is required' };
+  if (!context.delegateToAgent) return { ok: false, error: 'Delegation is not available in this runtime' };
+
+  return context.delegateToAgent({
+    agentUserID: typeof args.agentUserID === 'string' ? args.agentUserID.trim() : '',
+    templateID: typeof args.templateID === 'string' ? args.templateID.trim() : '',
+    task,
+    context: typeof args.context === 'string' ? args.context.trim() : '',
+  });
 }
 
 function clampInteger(value, defaultValue, min, max) {

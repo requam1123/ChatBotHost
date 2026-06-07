@@ -6,10 +6,12 @@ import { ImClient } from './im-client.js';
 import { getTemplate, listActiveTemplates } from './market.js';
 import { executeToolCall, findTools, listTools, toolCatalog } from './tools.js';
 import { generateAgentReply, testAgentProvider } from './providers.js';
+import { createLangGraphRuntime } from './langgraph-runtime.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.storageDir);
 const imClient = new ImClient(config.imServerBaseURL);
+const langGraphRuntime = await createLangGraphRuntime();
 
 const routes = [
   {
@@ -19,6 +21,11 @@ const routes = [
       status: 'ok',
       service: 'ChatBotHost',
       imServerBaseURL: config.imServerBaseURL,
+      langGraphRuntime: {
+        available: langGraphRuntime.available,
+        source: langGraphRuntime.source,
+        error: langGraphRuntime.error || '',
+      },
       time: Date.now(),
     }),
   },
@@ -224,7 +231,13 @@ function parseMessageEvent(body) {
 
 async function runMockAgentReply(runID, agent, event) {
   const startTime = Date.now();
-  const result = await buildAgentReply(agent, event);
+  const result = await buildAgentReply(agent, event, {
+    runID,
+    rootRunID: runID,
+    parentRunID: '',
+    depth: 0,
+    allowDelegate: true,
+  });
   const replyText = result.content;
   const initial = '正在思考...';
   const sent = await imClient.sendMessage({
@@ -248,39 +261,21 @@ async function runMockAgentReply(runID, agent, event) {
 
   const runs = await store.readCollection('agent-runs');
   const endTime = Date.now();
-  runs.push({
+  runs.push(buildRunRecord({
     runID,
-    userAgentID: agent.userAgentID,
-    imAgentUserID: agent.imAgentUserID,
-    ownerUserID: agent.ownerUserID,
-    conversationID: event.conversationID,
-    requestServerMsgID: event.serverMsgID,
     responseServerMsgID: serverMsgID,
-    status: result.status,
-    mode: result.mode,
-    provider: result.provider,
-    endpoint: result.endpoint,
-    model: result.model,
-    input: {
-      sendID: event.sendID,
-      recvID: event.recvID,
-      content: event.content,
-      contentType: event.contentType,
-      serverMsgID: event.serverMsgID,
-    },
     output: {
       sendID: agent.imAgentUserID,
       recvID: event.sendID,
       content: replyText,
       serverMsgID,
     },
-    toolCalls: result.toolCalls,
-    error: result.error,
+    agent,
+    event,
+    result,
     startTime,
     endTime,
-    durationMs: endTime - startTime,
-    createTime: endTime,
-  });
+  }));
   await store.writeCollection('agent-runs', runs);
 }
 
@@ -296,13 +291,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function buildAgentReply(agent, event) {
+async function buildAgentReply(agent, event, runContext = {}) {
   try {
     const result = await generateAgentReply(config, agent, event, {
       toolExecutor: (toolID, args, context) => executeToolCall(toolID, args, {
         ...context,
         imClient,
+        runContext,
         enabledToolIDs: agent.enabledToolIDs || [],
+        delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
       }),
     });
     return { ...result, mode: 'provider', status: 'success', error: '' };
@@ -320,6 +317,155 @@ async function buildAgentReply(agent, event) {
       error: message,
     };
   }
+}
+
+async function delegateToAgent(sourceAgent, event, runContext, delegation) {
+  if (!runContext.allowDelegate || runContext.depth >= 1) {
+    return { ok: false, error: 'Delegation depth limit reached' };
+  }
+
+  const userAgents = await store.readCollection('user-agents');
+  const targetAgent = findDelegationTarget(userAgents, sourceAgent, delegation);
+  if (!targetAgent) {
+    return { ok: false, error: 'No eligible target agent found for delegation' };
+  }
+
+  const childRunID = `run_${randomUUID()}`;
+  const childEvent = {
+    conversationID: event.conversationID,
+    sendID: sourceAgent.imAgentUserID,
+    recvID: targetAgent.imAgentUserID,
+    content: buildDelegationContent(delegation),
+    serverMsgID: '',
+    contentType: 101,
+  };
+  const startTime = Date.now();
+  const result = await buildAgentReply(targetAgent, childEvent, {
+    runID: childRunID,
+    rootRunID: runContext.rootRunID || runContext.runID,
+    parentRunID: runContext.runID,
+    depth: runContext.depth + 1,
+    allowDelegate: false,
+    delegatedByAgentID: sourceAgent.userAgentID,
+    delegatedToAgentID: targetAgent.userAgentID,
+    delegationTask: delegation.task,
+  });
+  const endTime = Date.now();
+
+  const runs = await store.readCollection('agent-runs');
+  runs.push(buildRunRecord({
+    runID: childRunID,
+    parentRunID: runContext.runID,
+    rootRunID: runContext.rootRunID || runContext.runID,
+    runType: 'delegated',
+    delegatedByAgentID: sourceAgent.userAgentID,
+    delegatedToAgentID: targetAgent.userAgentID,
+    delegationTask: delegation.task,
+    responseServerMsgID: '',
+    output: {
+      sendID: targetAgent.imAgentUserID,
+      recvID: sourceAgent.imAgentUserID,
+      content: result.content,
+      serverMsgID: '',
+    },
+    agent: targetAgent,
+    event: childEvent,
+    result,
+    startTime,
+    endTime,
+  }));
+  await store.writeCollection('agent-runs', runs);
+
+  return {
+    ok: result.status === 'success',
+    childRunID,
+    delegatedToAgentID: targetAgent.userAgentID,
+    delegatedToAgentUserID: targetAgent.imAgentUserID,
+    delegatedToTemplateID: targetAgent.templateID,
+    task: delegation.task,
+    output: result.content,
+    durationMs: endTime - startTime,
+    error: result.error || '',
+  };
+}
+
+function findDelegationTarget(userAgents, sourceAgent, delegation) {
+  const candidates = userAgents.filter((agent) => (
+    agent.ownerUserID === sourceAgent.ownerUserID &&
+    agent.userAgentID !== sourceAgent.userAgentID &&
+    agent.status !== 'disabled'
+  ));
+  if (delegation.agentUserID) {
+    return candidates.find((agent) => (
+      agent.imAgentUserID === delegation.agentUserID ||
+      agent.userAgentID === delegation.agentUserID
+    ));
+  }
+  if (delegation.templateID) {
+    return candidates.find((agent) => agent.templateID === delegation.templateID);
+  }
+  return candidates[0];
+}
+
+function buildDelegationContent(delegation) {
+  if (!delegation.context) return delegation.task;
+  return `${delegation.task}\n\nContext:\n${delegation.context}`;
+}
+
+function buildRunRecord({
+  runID,
+  parentRunID = '',
+  rootRunID = runID,
+  runType = 'chat',
+  delegatedByAgentID = '',
+  delegatedToAgentID = '',
+  delegationTask = '',
+  responseServerMsgID,
+  output,
+  agent,
+  event,
+  result,
+  startTime,
+  endTime,
+}) {
+  const childrenRunIDs = (result.toolCalls || [])
+    .map((call) => call.result?.childRunID)
+    .filter(Boolean);
+  return {
+    runID,
+    parentRunID,
+    rootRunID,
+    runType,
+    delegatedByAgentID,
+    delegatedToAgentID,
+    delegationTask,
+    childrenRunIDs,
+    userAgentID: agent.userAgentID,
+    imAgentUserID: agent.imAgentUserID,
+    ownerUserID: agent.ownerUserID,
+    conversationID: event.conversationID,
+    requestServerMsgID: event.serverMsgID,
+    responseServerMsgID,
+    status: result.status,
+    mode: result.mode,
+    provider: result.provider,
+    endpoint: result.endpoint,
+    model: result.model,
+    input: {
+      sendID: event.sendID,
+      recvID: event.recvID,
+      content: event.content,
+      contentType: event.contentType,
+      serverMsgID: event.serverMsgID,
+    },
+    output,
+    toolCalls: result.toolCalls,
+    error: result.error,
+    startTime,
+    endTime,
+    durationMs: endTime - startTime,
+    createTime: endTime,
+  };
 }
 
 function clampInteger(value, defaultValue, min, max) {
