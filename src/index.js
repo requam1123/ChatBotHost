@@ -149,6 +149,9 @@ const routes = [
         systemPrompt: body.systemPrompt || template.defaultSystemPrompt,
         secretRefID: body.secretRefID || '',
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
+        runtime: body.runtime || template.defaultRuntime || 'openai-tools',
+        workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
+        workerAgentUserID: body.workerAgentUserID || '',
         status: 'active',
         createTime: now,
         updateTime: now,
@@ -275,7 +278,7 @@ function parseMessageEvent(body) {
 
 async function runMockAgentReply(runID, agent, event) {
   const startTime = Date.now();
-  const result = await buildAgentReply(agent, event, {
+  const result = await buildAgentReplyForRuntime(agent, event, {
     runID,
     rootRunID: runID,
     parentRunID: '',
@@ -335,6 +338,13 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function buildAgentReplyForRuntime(agent, event, runContext = {}) {
+  if (agent.runtime === 'langgraph-planner-worker') {
+    return buildLangGraphAgentReply(agent, event, runContext);
+  }
+  return buildAgentReply(agent, event, runContext);
+}
+
 async function buildAgentReply(agent, event, runContext = {}) {
   try {
     const result = await generateAgentReply(config, agent, event, {
@@ -361,6 +371,43 @@ async function buildAgentReply(agent, event, runContext = {}) {
       error: message,
     };
   }
+}
+
+async function buildLangGraphAgentReply(agent, event) {
+  if (!langGraphRuntime.available || !langGraphRuntime.runPlannerWorkerGraph) {
+    throw new Error('LangGraph runtime is not available');
+  }
+
+  const workerAgent = await requireWorkerAgent(agent, {
+    agentUserID: agent.workerAgentUserID || '',
+    templateID: agent.workerTemplateID || 'coder',
+  });
+  const result = await langGraphRuntime.runPlannerWorkerGraph({
+    task: event.content,
+    context: `IM conversation: ${event.conversationID}`,
+    plannerAgent: agent,
+    workerAgent,
+    event,
+    generateReply: (nextAgent, nextEvent) => buildGraphNodeReply(nextAgent, nextEvent),
+  });
+
+  return {
+    content: result.finalOutput,
+    mode: 'langgraph',
+    runtime: 'langgraph-planner-worker',
+    status: 'success',
+    provider: result.steps.find((step) => step.provider)?.provider || agent.provider || '',
+    endpoint: result.steps.find((step) => step.endpoint)?.endpoint || agent.endpoint || '',
+    model: result.steps.find((step) => step.model)?.model || agent.model || '',
+    toolCalls: [],
+    error: '',
+    graphSteps: result.steps,
+    workerAgentID: workerAgent.userAgentID,
+    workerAgentUserID: workerAgent.imAgentUserID,
+    workerTemplateID: workerAgent.templateID,
+    workerOutput: result.workerOutput,
+    finalOutput: result.finalOutput,
+  };
 }
 
 async function delegateToAgent(sourceAgent, event, runContext, delegation) {
@@ -492,9 +539,16 @@ function buildRunRecord({
     responseServerMsgID,
     status: result.status,
     mode: result.mode,
+    runtime: result.runtime || agent.runtime || 'openai-tools',
     provider: result.provider,
     endpoint: result.endpoint,
     model: result.model,
+    graphSteps: result.graphSteps || [],
+    workerAgentID: result.workerAgentID || '',
+    workerAgentUserID: result.workerAgentUserID || '',
+    workerTemplateID: result.workerTemplateID || '',
+    workerOutput: result.workerOutput || '',
+    finalOutput: result.finalOutput || output.content,
     input: {
       sendID: event.sendID,
       recvID: event.recvID,
@@ -545,8 +599,21 @@ async function buildGraphNodeReply(agent, event) {
 
 function sanitizeAgentUpdates(body) {
   const updates = {};
-  for (const key of ['nickname', 'avatarURL', 'provider', 'endpoint', 'model', 'systemPrompt']) {
+  for (const key of [
+    'nickname',
+    'avatarURL',
+    'provider',
+    'endpoint',
+    'model',
+    'systemPrompt',
+    'runtime',
+    'workerTemplateID',
+    'workerAgentUserID',
+  ]) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
+  }
+  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker'].includes(updates.runtime)) {
+    delete updates.runtime;
   }
   if (Array.isArray(body.enabledToolIDs)) {
     const validIDs = new Set(listTools().map((tool) => tool.toolID));
