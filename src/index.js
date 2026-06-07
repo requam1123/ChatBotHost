@@ -178,6 +178,50 @@ const routes = [
   },
   {
     method: 'POST',
+    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/graph\/delegate-test$/,
+    handler: async ({ params, body }) => {
+      if (!langGraphRuntime.available || !langGraphRuntime.runPlannerWorkerGraph) {
+        throw new HttpError(503, 'LangGraph runtime is not available');
+      }
+
+      const plannerAgent = await requireUserAgent(params.userAgentID);
+      const workerAgent = await requireWorkerAgent(plannerAgent, body);
+      const task = requiredString(body.task, 'task');
+      const event = {
+        conversationID: typeof body.conversationID === 'string' && body.conversationID.trim()
+          ? body.conversationID.trim()
+          : `graph_${plannerAgent.userAgentID}`,
+        sendID: plannerAgent.ownerUserID,
+        recvID: plannerAgent.imAgentUserID,
+        content: task,
+        serverMsgID: '',
+        contentType: 101,
+      };
+
+      const startTime = Date.now();
+      const result = await langGraphRuntime.runPlannerWorkerGraph({
+        task,
+        context: typeof body.context === 'string' ? body.context : '',
+        plannerAgent,
+        workerAgent,
+        event,
+        generateReply: (agent, nextEvent) => buildGraphNodeReply(agent, nextEvent),
+      });
+
+      return {
+        runtime: 'langgraph',
+        durationMs: Date.now() - startTime,
+        plannerAgentID: plannerAgent.userAgentID,
+        workerAgentID: workerAgent.userAgentID,
+        task,
+        workerOutput: result.workerOutput,
+        finalOutput: result.finalOutput,
+        steps: result.steps,
+      };
+    },
+  },
+  {
+    method: 'POST',
     pattern: /^\/im\/events\/message$/,
     handler: async ({ body }) => {
       const event = parseMessageEvent(body);
@@ -479,6 +523,24 @@ async function requireUserAgent(userAgentID) {
   const agent = userAgents.find((item) => item.userAgentID === userAgentID);
   if (!agent) throw new HttpError(404, 'Agent not found');
   return agent;
+}
+
+async function requireWorkerAgent(plannerAgent, body) {
+  const userAgents = await store.readCollection('user-agents');
+  const worker = findDelegationTarget(userAgents, plannerAgent, {
+    agentUserID: typeof body.agentUserID === 'string' ? body.agentUserID.trim() : '',
+    templateID: typeof body.templateID === 'string' ? body.templateID.trim() : 'coder',
+  });
+  if (!worker) throw new HttpError(404, 'Worker agent not found');
+  return worker;
+}
+
+async function buildGraphNodeReply(agent, event) {
+  const result = await generateAgentReply(config, {
+    ...agent,
+    enabledToolIDs: [],
+  }, event, {});
+  return { ...result, mode: 'langgraph', status: 'success', error: '' };
 }
 
 function sanitizeAgentUpdates(body) {
