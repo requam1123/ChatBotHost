@@ -8,9 +8,21 @@ importers:
 
   .:
     dependencies:
+      '@langchain/core':
+        specifier: ^1.1.48
+        version: 1.1.48(openai@6.42.0(zod@4.4.3))
       '@langchain/langgraph':
         specifier: ^1.3.6
-        version: 1.3.6(@langchain/core@1.1.48)(zod@4.4.3)
+        version: 1.3.6(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))(zod@4.4.3)
+      '@langchain/openai':
+        specifier: ^1.4.7
+        version: 1.4.7(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))
+      langchain:
+        specifier: ^1.4.4
+        version: 1.4.4(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))(openai@6.42.0(zod@4.4.3))
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
 packages:
 
@@ -56,6 +68,12 @@ packages:
       zod-to-json-schema:
         optional: true
 
+  '@langchain/openai@1.4.7':
+    resolution: {integrity: sha512-i1YLV4pWbGC6W8m0ZNpLObJuf1nyU4o8aWyX4AF9fHn7eM67HfIJWQ5n5XzcCpuSa41otrxA9jvH5XRKwI1qDA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@langchain/core': ^1.1.48
+
   '@langchain/protocol@0.0.16':
     resolution: {integrity: sha512-ws+J7MaHyhO5dG7f0vdyHQiUn9hoCnki0f3crJPa4MCTGzcRC39jYSCghyrGtBPYQnZbUQiGyRVpW3z3M8IpJg==}
 
@@ -81,6 +99,12 @@ packages:
   js-tiktoken@1.0.21:
     resolution: {integrity: sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g==}
 
+  langchain@1.4.4:
+    resolution: {integrity: sha512-tepOCwUDaIZOYJ9Eo0O6o5dXEN/0KJheiFDnHHFL8Tx8rfkDLL4cOTSTln4Vpn9LpWzXYkjQ8lkHnnNDQWZPeg==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@langchain/core': ^1.1.48
+
   langsmith@0.7.5:
     resolution: {integrity: sha512-OeD6+yKtWwy6sAboq25kD5DICzYv7j2KgtV2n4LsJ8nU2LpEdt1UwbjA6BON/zTggmS/YjV2TtLTHd7VEJhtEA==}
     peerDependencies:
@@ -104,6 +128,17 @@ packages:
   mustache@4.2.0:
     resolution: {integrity: sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ==}
     hasBin: true
+
+  openai@6.42.0:
+    resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
 
   p-finally@1.0.0:
     resolution: {integrity: sha512-LICb2p9CB7FS+0eR1oqWnHhp0FljGLZCWBE9aix0Uye9W8LTQPwMTYVGWQWIw9RdQiDg4+epXQODwIYJtSJaow==}
@@ -140,12 +175,12 @@ snapshots:
 
   '@cfworker/json-schema@4.1.1': {}
 
-  '@langchain/core@1.1.48':
+  '@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3))':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@standard-schema/spec': 1.1.0
       js-tiktoken: 1.0.21
-      langsmith: 0.7.5
+      langsmith: 0.7.5(openai@6.42.0(zod@4.4.3))
       mustache: 4.2.0
       p-queue: 6.6.2
       zod: 4.4.3
@@ -156,25 +191,25 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/langgraph-checkpoint@1.0.4(@langchain/core@1.1.48)':
+  '@langchain/langgraph-checkpoint@1.0.4(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))':
     dependencies:
-      '@langchain/core': 1.1.48
+      '@langchain/core': 1.1.48(openai@6.42.0(zod@4.4.3))
       uuid: 14.0.0
 
-  '@langchain/langgraph-sdk@1.9.18(@langchain/core@1.1.48)':
+  '@langchain/langgraph-sdk@1.9.18(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))':
     dependencies:
-      '@langchain/core': 1.1.48
+      '@langchain/core': 1.1.48(openai@6.42.0(zod@4.4.3))
       '@langchain/protocol': 0.0.16
       '@types/json-schema': 7.0.15
       p-queue: 9.3.0
       p-retry: 7.1.1
       uuid: 14.0.0
 
-  '@langchain/langgraph@1.3.6(@langchain/core@1.1.48)(zod@4.4.3)':
+  '@langchain/langgraph@1.3.6(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))(zod@4.4.3)':
     dependencies:
-      '@langchain/core': 1.1.48
-      '@langchain/langgraph-checkpoint': 1.0.4(@langchain/core@1.1.48)
-      '@langchain/langgraph-sdk': 1.9.18(@langchain/core@1.1.48)
+      '@langchain/core': 1.1.48(openai@6.42.0(zod@4.4.3))
+      '@langchain/langgraph-checkpoint': 1.0.4(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))
+      '@langchain/langgraph-sdk': 1.9.18(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))
       '@langchain/protocol': 0.0.16
       '@standard-schema/spec': 1.1.0
       uuid: 14.0.0
@@ -184,6 +219,15 @@ snapshots:
       - react-dom
       - svelte
       - vue
+
+  '@langchain/openai@1.4.7(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))':
+    dependencies:
+      '@langchain/core': 1.1.48(openai@6.42.0(zod@4.4.3))
+      js-tiktoken: 1.0.21
+      openai: 6.42.0(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - ws
 
   '@langchain/protocol@0.0.16': {}
 
@@ -203,11 +247,36 @@ snapshots:
     dependencies:
       base64-js: 1.5.1
 
-  langsmith@0.7.5:
+  langchain@1.4.4(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))(openai@6.42.0(zod@4.4.3)):
+    dependencies:
+      '@langchain/core': 1.1.48(openai@6.42.0(zod@4.4.3))
+      '@langchain/langgraph': 1.3.6(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))(zod@4.4.3)
+      '@langchain/langgraph-checkpoint': 1.0.4(@langchain/core@1.1.48(openai@6.42.0(zod@4.4.3)))
+      langsmith: 0.7.5(openai@6.42.0(zod@4.4.3))
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+      - '@opentelemetry/exporter-trace-otlp-proto'
+      - '@opentelemetry/sdk-trace-base'
+      - openai
+      - react
+      - react-dom
+      - svelte
+      - vue
+      - ws
+      - zod-to-json-schema
+
+  langsmith@0.7.5(openai@6.42.0(zod@4.4.3)):
     dependencies:
       p-queue: 6.6.2
+    optionalDependencies:
+      openai: 6.42.0(zod@4.4.3)
 
   mustache@4.2.0: {}
+
+  openai@6.42.0(zod@4.4.3):
+    optionalDependencies:
+      zod: 4.4.3
 
   p-finally@1.0.0: {}
 

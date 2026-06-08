@@ -42,14 +42,16 @@ export class ImClient {
     }, agentToken, { tolerateStatuses: [404, 409] });
   }
 
-  async sendMessage({ sendID, recvID, content, senderNickname, senderFaceURL }) {
+  async sendMessage({ sendID, recvID, groupID, content, senderNickname, senderFaceURL, atUserIDList = [], contentType }) {
     const token = await this.getToken(sendID);
     return this.post('/msg/send_msg', {
       sendID,
       recvID,
-      sessionType: 1,
-      contentType: 101,
+      groupID,
+      sessionType: groupID ? 2 : 1,
+      contentType: contentType || (atUserIDList.length > 0 ? 106 : 101),
       content,
+      atUserIDList,
       senderPlatformID: 12,
       senderNickname,
       senderFaceURL,

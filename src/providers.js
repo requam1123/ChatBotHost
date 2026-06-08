@@ -58,7 +58,7 @@ export async function testAgentProvider(config, agent, overrides = {}) {
   }
 }
 
-function resolveProviderConfig(config, agent) {
+export function resolveProviderConfig(config, agent) {
   const provider = agent.provider || 'ark';
   const endpoint = agent.endpoint || '';
 

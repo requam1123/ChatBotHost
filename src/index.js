@@ -7,11 +7,22 @@ import { getTemplate, listActiveTemplates } from './market.js';
 import { executeToolCall, findTools, listTools, toolCatalog } from './tools.js';
 import { generateAgentReply, testAgentProvider } from './providers.js';
 import { createLangGraphRuntime } from './langgraph-runtime.js';
+import { generateLangChainAgentReply } from './langchain-agent-runtime.js';
+import { applyPatchProposal, createPatchPreview } from './patch-manager.js';
+import { createLangGraphSupervisorRuntime } from './langgraph-supervisor-runtime.js';
+import {
+  buildArtifactsFromToolCalls,
+  normalizeArtifacts,
+  normalizeApprovals,
+  normalizeGraphSteps,
+  normalizeToolCalls,
+} from './run-records.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.storageDir);
 const imClient = new ImClient(config.imServerBaseURL);
 const langGraphRuntime = await createLangGraphRuntime();
+const langGraphSupervisorRuntime = await createLangGraphSupervisorRuntime();
 
 const routes = [
   {
@@ -25,6 +36,11 @@ const routes = [
         available: langGraphRuntime.available,
         source: langGraphRuntime.source,
         error: langGraphRuntime.error || '',
+      },
+      langGraphSupervisorRuntime: {
+        available: langGraphSupervisorRuntime.available,
+        source: langGraphSupervisorRuntime.source,
+        error: langGraphSupervisorRuntime.error || '',
       },
       time: Date.now(),
     }),
@@ -90,6 +106,82 @@ const routes = [
       const run = runs.find((item) => item.userAgentID === params.userAgentID && item.runID === params.runID);
       if (!run) throw new HttpError(404, 'Run not found');
       return { run };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/runs\/(?<runID>[^/]+)\/patch\/preview$/,
+    handler: async ({ params, body }) => {
+      const { runs, run, index } = await requireAgentRun(params.userAgentID, params.runID);
+      const proposal = await createPatchPreview({ config, run, body });
+      const updated = {
+        ...run,
+        patchProposal: proposal,
+        approvals: normalizeApprovals([
+          ...(run.approvals || []).filter((approval) => approval.type !== 'patch'),
+          {
+            type: 'patch',
+            status: proposal.status,
+            requestedByAgentID: run.userAgentID,
+            proposalID: proposal.proposalID,
+            createTime: proposal.createTime,
+            files: proposal.files,
+          },
+        ]),
+        artifacts: normalizeArtifacts([
+          ...(run.artifacts || []).filter((artifact) => artifact.type !== 'patch_proposal'),
+          {
+            type: 'patch_proposal',
+            proposalID: proposal.proposalID,
+            status: proposal.status,
+            files: proposal.files,
+            createTime: proposal.createTime,
+          },
+        ]),
+      };
+      runs[index] = updated;
+      await store.writeCollection('agent-runs', runs);
+      return { proposal, run: updated };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/runs\/(?<runID>[^/]+)\/patch\/apply$/,
+    handler: async ({ params }) => {
+      const { runs, run, index } = await requireAgentRun(params.userAgentID, params.runID);
+      const proposal = await applyPatchProposal({ config, run, proposal: run.patchProposal });
+      const updated = {
+        ...run,
+        patchProposal: proposal,
+        approvals: normalizeApprovals([
+          ...(run.approvals || []).filter((approval) => approval.type !== 'patch'),
+          {
+            type: 'patch',
+            status: proposal.status,
+            requestedByAgentID: run.userAgentID,
+            approvedByUserID: run.ownerUserID,
+            proposalID: proposal.proposalID,
+            createTime: proposal.createTime,
+            applyTime: proposal.appliedTime,
+            files: proposal.files,
+          },
+        ]),
+        artifacts: normalizeArtifacts([
+          ...(run.artifacts || []).filter((artifact) => artifact.type !== 'patch_proposal'),
+          {
+            type: 'patch_proposal',
+            proposalID: proposal.proposalID,
+            status: proposal.status,
+            files: proposal.files,
+            appliedFiles: proposal.appliedFiles,
+            createTime: proposal.createTime,
+            appliedTime: proposal.appliedTime,
+          },
+        ]),
+      };
+      runs[index] = updated;
+      await store.writeCollection('agent-runs', runs);
+      return { proposal, run: updated };
     },
   },
   {
@@ -270,13 +362,22 @@ function parseMessageEvent(body) {
     conversationID: requiredString(body.conversationID, 'conversationID'),
     sendID: requiredString(body.sendID, 'sendID'),
     recvID: requiredString(body.recvID, 'recvID'),
+    groupID: typeof body.groupID === 'string' ? body.groupID : '',
     content: typeof body.content === 'string' ? body.content : '',
     serverMsgID: typeof body.serverMsgID === 'string' ? body.serverMsgID : '',
     contentType: typeof body.contentType === 'number' ? body.contentType : 101,
+    sessionType: typeof body.sessionType === 'number' ? body.sessionType : 1,
+    atUserIDList: Array.isArray(body.atUserIDList) ? body.atUserIDList.filter((id) => typeof id === 'string') : [],
+    mentionedAgentIDs: Array.isArray(body.mentionedAgentIDs) ? body.mentionedAgentIDs.filter((id) => typeof id === 'string') : [],
   };
 }
 
 async function runMockAgentReply(runID, agent, event) {
+  if (event.groupID && agent.runtime === 'langgraph-planner-worker') {
+    await runVisibleGroupCollaboration(runID, agent, event);
+    return;
+  }
+
   const startTime = Date.now();
   const result = await buildAgentReplyForRuntime(agent, event, {
     runID,
@@ -289,7 +390,8 @@ async function runMockAgentReply(runID, agent, event) {
   const initial = '正在思考...';
   const sent = await imClient.sendMessage({
     sendID: agent.imAgentUserID,
-    recvID: event.sendID,
+    recvID: event.groupID ? undefined : event.sendID,
+    groupID: event.groupID || undefined,
     content: initial,
     senderNickname: agent.nickname,
     senderFaceURL: agent.avatarURL,
@@ -314,6 +416,7 @@ async function runMockAgentReply(runID, agent, event) {
     output: {
       sendID: agent.imAgentUserID,
       recvID: event.sendID,
+      groupID: event.groupID,
       content: replyText,
       serverMsgID,
     },
@@ -324,6 +427,456 @@ async function runMockAgentReply(runID, agent, event) {
     endTime,
   }));
   await store.writeCollection('agent-runs', runs);
+}
+
+async function runVisibleGroupCollaboration(runID, plannerAgent, event) {
+  if (langGraphSupervisorRuntime.available && langGraphSupervisorRuntime.runVisibleSupervisorGraph) {
+    try {
+      await runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event);
+      return;
+    } catch (err) {
+      console.error('LangGraph supervisor visible collaboration failed, falling back to legacy flow', err);
+    }
+  }
+  await runVisibleGroupCollaborationLegacy(runID, plannerAgent, event);
+}
+
+async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
+  const startTime = Date.now();
+  const workerAgent = await requireWorkerAgent(plannerAgent, {
+    agentUserID: plannerAgent.workerAgentUserID || '',
+    templateID: plannerAgent.workerTemplateID || 'coder',
+  });
+  const reviewerAgent = await findOptionalAgent(plannerAgent, 'reviewer');
+
+  const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
+  const cleanTask = stripMentionText(event.content, mentionNames);
+  const plannerAck = reviewerAgent
+    ? `@${event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我再 @Reviewer 做代码审查\n4. 我最后 @${event.sendID} 汇总最终结果`
+    : `@${event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我最后 @${event.sendID} 汇总最终结果`;
+  const plannerAckMsg = await sendGroupText(plannerAgent, event.groupID, plannerAck, [event.sendID]);
+
+  const plannerDelegate = `@${workerAgent.nickname} 请完成这个代码任务：${cleanTask}`;
+  const plannerDelegateMsg = await sendGroupText(plannerAgent, event.groupID, plannerDelegate, [workerAgent.imAgentUserID]);
+
+  const coderAck = `@${plannerAgent.nickname} 收到，我开始实现这个函数，并会把代码结果回传给你。`;
+  const coderAckMsg = await sendGroupText(workerAgent, event.groupID, coderAck, [plannerAgent.imAgentUserID]);
+
+  const workerTask = `请完成用户交给 Planner 的代码任务，并只输出可用代码和必要说明。\n\n用户任务：\n${cleanTask}`;
+  const workerStartTime = Date.now();
+  const workerRunID = `${runID}_worker`;
+  const workerResult = await buildGraphNodeReply(workerAgent, {
+    ...event,
+    sendID: plannerAgent.imAgentUserID,
+    recvID: workerAgent.imAgentUserID,
+    content: workerTask,
+    serverMsgID: '',
+  }, { runID: workerRunID, workspaceID: runID, allowTools: true });
+  const workerEndTime = Date.now();
+
+  const coderResultText = `@${plannerAgent.nickname} 我完成了代码实现：\n\n${workerResult.content}`;
+  const coderResultMsg = await sendGroupText(workerAgent, event.groupID, coderResultText, [plannerAgent.imAgentUserID]);
+
+  let reviewerAckMsg = null;
+  let reviewerResultMsg = null;
+  let reviewerResult = null;
+  const allToolCalls = tagToolCalls(workerResult.toolCalls || [], 'worker', workerAgent);
+  const resultGraphExtraSteps = [];
+  if (reviewerAgent) {
+    const plannerReviewRequest = `@${reviewerAgent.nickname} 请审查 Coder 的实现，重点看正确性、边界情况和可维护性。`;
+    const plannerReviewMsg = await sendGroupText(plannerAgent, event.groupID, plannerReviewRequest, [reviewerAgent.imAgentUserID]);
+    reviewerAckMsg = await sendGroupText(reviewerAgent, event.groupID, `@${plannerAgent.nickname} 收到，我开始审查 Coder 的代码。`, [plannerAgent.imAgentUserID]);
+    const reviewTask = `请审查下面的 TypeScript 实现，重点关注正确性、边界条件、类型设计、可维护性，并给出是否可交付的结论。\n\n用户任务：\n${cleanTask}\n\nCoder 输出：\n${workerResult.content}`;
+    const reviewerRunID = `${runID}_reviewer`;
+    reviewerResult = await buildGraphNodeReply(reviewerAgent, {
+      ...event,
+      sendID: plannerAgent.imAgentUserID,
+      recvID: reviewerAgent.imAgentUserID,
+      content: reviewTask,
+      serverMsgID: '',
+    }, { runID: reviewerRunID, workspaceID: runID, allowTools: true });
+    allToolCalls.push(...tagToolCalls(reviewerResult.toolCalls || [], 'reviewer', reviewerAgent));
+    reviewerResultMsg = await sendGroupText(
+      reviewerAgent,
+      event.groupID,
+      `@${plannerAgent.nickname} 我完成审查：\n\n${reviewerResult.content}`,
+      [plannerAgent.imAgentUserID],
+    );
+    resultGraphExtraSteps.push(
+      { node: 'planner_review_request', agentID: plannerAgent.userAgentID, output: plannerReviewRequest, serverMsgID: plannerReviewMsg.serverMsgID, time: Date.now() },
+      { node: 'reviewer_ack', agentID: reviewerAgent.userAgentID, output: `@${plannerAgent.nickname} 收到，我开始审查 Coder 的代码。`, serverMsgID: reviewerAckMsg.serverMsgID, time: Date.now() },
+      {
+        node: 'reviewer',
+        agentID: reviewerAgent.userAgentID,
+        output: reviewerResult.content,
+        serverMsgID: reviewerResultMsg.serverMsgID,
+        provider: reviewerResult.provider,
+        endpoint: reviewerResult.endpoint,
+        model: reviewerResult.model,
+        time: Date.now(),
+      },
+    );
+  }
+
+  const summaryTask = `Coder 已完成代码实现${reviewerResult ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${cleanTask}\n\nCoder 输出：\n${workerResult.content}${reviewerResult ? `\n\nReviewer 输出：\n${reviewerResult.content}` : ''}`;
+  const summaryResult = await buildGraphNodeReply(plannerAgent, {
+    ...event,
+    content: summaryTask,
+  });
+  const finalText = `@${event.sendID} ${summaryResult.content}`;
+  const finalMsg = await sendGroupText(plannerAgent, event.groupID, finalText, [event.sendID]);
+
+  const endTime = Date.now();
+  const result = {
+    content: finalText,
+    mode: 'langgraph-visible',
+    runtime: 'langgraph-planner-worker',
+    status: 'success',
+    provider: summaryResult.provider || workerResult.provider || plannerAgent.provider || '',
+    endpoint: summaryResult.endpoint || workerResult.endpoint || plannerAgent.endpoint || '',
+    model: summaryResult.model || workerResult.model || plannerAgent.model || '',
+    toolCalls: [],
+    error: '',
+    graphSteps: [
+      { node: 'planner_ack', output: plannerAck, serverMsgID: plannerAckMsg.serverMsgID, time: startTime },
+      { node: 'planner_delegate', output: plannerDelegate, serverMsgID: plannerDelegateMsg.serverMsgID, time: startTime },
+      { node: 'worker_ack', agentID: workerAgent.userAgentID, output: coderAck, serverMsgID: coderAckMsg.serverMsgID, time: workerStartTime },
+      {
+        node: 'worker',
+        agentID: workerAgent.userAgentID,
+        output: workerResult.content,
+        serverMsgID: coderResultMsg.serverMsgID,
+        provider: workerResult.provider,
+        endpoint: workerResult.endpoint,
+        model: workerResult.model,
+        toolCalls: tagToolCalls(workerResult.toolCalls || [], 'worker', workerAgent),
+        time: workerEndTime,
+      },
+      ...resultGraphExtraSteps,
+      {
+        node: 'summary',
+        agentID: plannerAgent.userAgentID,
+        output: summaryResult.content,
+        serverMsgID: finalMsg.serverMsgID,
+        provider: summaryResult.provider,
+        endpoint: summaryResult.endpoint,
+        model: summaryResult.model,
+        time: endTime,
+      },
+    ],
+    workerAgentID: workerAgent.userAgentID,
+    workerAgentUserID: workerAgent.imAgentUserID,
+    workerTemplateID: workerAgent.templateID,
+    workerOutput: workerResult.content,
+    toolCalls: allToolCalls,
+    finalOutput: finalText,
+  };
+
+  const runs = await store.readCollection('agent-runs');
+  runs.push(buildRunRecord({
+    runID,
+    responseServerMsgID: finalMsg.serverMsgID,
+    output: {
+      sendID: plannerAgent.imAgentUserID,
+      recvID: event.sendID,
+      groupID: event.groupID,
+      content: finalText,
+      serverMsgID: finalMsg.serverMsgID,
+    },
+    agent: plannerAgent,
+    event,
+    result,
+    startTime,
+    endTime,
+  }));
+  await store.writeCollection('agent-runs', runs);
+}
+
+async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event) {
+  const startTime = Date.now();
+  const workerAgent = await requireWorkerAgent(plannerAgent, {
+    agentUserID: plannerAgent.workerAgentUserID || '',
+    templateID: plannerAgent.workerTemplateID || 'coder',
+  });
+  const reviewerAgent = await findOptionalAgent(plannerAgent, 'reviewer');
+  const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
+  const cleanTask = stripMentionText(event.content, mentionNames);
+
+  const graphResult = await langGraphSupervisorRuntime.runVisibleSupervisorGraph({
+    runID,
+    task: event.content,
+    cleanTask,
+    plannerAgent,
+    workerAgent,
+    reviewerAgent,
+    event,
+    nodes: {
+      plannerAck: async (state) => {
+        const plannerAck = state.reviewerAgent
+          ? `@${state.event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我再 @Reviewer 做代码审查\n4. 我最后 @${state.event.sendID} 汇总最终结果`
+          : `@${state.event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我最后 @${state.event.sendID} 汇总最终结果`;
+        const sent = await sendGroupText(state.plannerAgent, state.event.groupID, plannerAck, [state.event.sendID]);
+        const time = Date.now();
+        return {
+          plannerAck,
+          graphSteps: [{
+            node: 'planner_ack',
+            agentID: state.plannerAgent.userAgentID,
+            agentUserID: state.plannerAgent.imAgentUserID,
+            agentNickname: state.plannerAgent.nickname,
+            output: plannerAck,
+            serverMsgID: sent.serverMsgID,
+            startTime: time,
+            endTime: time,
+            time,
+          }],
+        };
+      },
+      plannerDelegate: async (state) => {
+        const plannerDelegate = `@${state.workerAgent.nickname} 请完成这个代码任务：${state.cleanTask}`;
+        const delegateMsg = await sendGroupText(state.plannerAgent, state.event.groupID, plannerDelegate, [state.workerAgent.imAgentUserID]);
+        const coderAck = `@${state.plannerAgent.nickname} 收到，我开始实现这个函数，并会把代码结果回传给你。`;
+        const ackMsg = await sendGroupText(state.workerAgent, state.event.groupID, coderAck, [state.plannerAgent.imAgentUserID]);
+        const time = Date.now();
+        return {
+          plannerDelegate,
+          coderAck,
+          workerTask: `请完成用户交给 Planner 的代码任务，并只输出可用代码和必要说明。\n\n用户任务：\n${state.cleanTask}`,
+          graphSteps: [
+            {
+              node: 'planner_delegate',
+              agentID: state.plannerAgent.userAgentID,
+              agentUserID: state.plannerAgent.imAgentUserID,
+              agentNickname: state.plannerAgent.nickname,
+              output: plannerDelegate,
+              serverMsgID: delegateMsg.serverMsgID,
+              startTime: time,
+              endTime: time,
+              time,
+            },
+            {
+              node: 'worker_ack',
+              agentID: state.workerAgent.userAgentID,
+              agentUserID: state.workerAgent.imAgentUserID,
+              agentNickname: state.workerAgent.nickname,
+              output: coderAck,
+              serverMsgID: ackMsg.serverMsgID,
+              startTime: time,
+              endTime: time,
+              time,
+            },
+          ],
+        };
+      },
+      worker: async (state) => {
+        const nodeStartTime = Date.now();
+        const workerResult = await buildGraphNodeReply(state.workerAgent, {
+          ...state.event,
+          sendID: state.plannerAgent.imAgentUserID,
+          recvID: state.workerAgent.imAgentUserID,
+          content: state.workerTask,
+          serverMsgID: '',
+        }, { runID: `${state.runID}_worker`, workspaceID: state.runID, allowTools: true });
+        const taggedToolCalls = tagToolCalls(workerResult.toolCalls || [], 'worker', state.workerAgent);
+        const coderResultText = `@${state.plannerAgent.nickname} 我完成了代码实现：\n\n${workerResult.content}`;
+        const resultMsg = await sendGroupText(state.workerAgent, state.event.groupID, coderResultText, [state.plannerAgent.imAgentUserID]);
+        const nodeEndTime = Date.now();
+        return {
+          workerOutput: workerResult.content,
+          toolCalls: taggedToolCalls,
+          graphSteps: [{
+            node: 'worker',
+            agentID: state.workerAgent.userAgentID,
+            agentUserID: state.workerAgent.imAgentUserID,
+            agentNickname: state.workerAgent.nickname,
+            output: workerResult.content,
+            serverMsgID: resultMsg.serverMsgID,
+            provider: workerResult.provider,
+            endpoint: workerResult.endpoint,
+            model: workerResult.model,
+            toolCalls: taggedToolCalls,
+            toolCallIDs: taggedToolCalls.map((call) => call.toolCallID).filter(Boolean),
+            startTime: nodeStartTime,
+            endTime: nodeEndTime,
+            time: nodeEndTime,
+          }],
+        };
+      },
+      reviewer: async (state) => {
+        const nodeStartTime = Date.now();
+        const plannerReviewRequest = `@${state.reviewerAgent.nickname} 请审查 Coder 的实现，重点看正确性、边界情况和可维护性。`;
+        const reviewRequestMsg = await sendGroupText(state.plannerAgent, state.event.groupID, plannerReviewRequest, [state.reviewerAgent.imAgentUserID]);
+        const reviewerAck = `@${state.plannerAgent.nickname} 收到，我开始审查 Coder 的代码。`;
+        const reviewerAckMsg = await sendGroupText(state.reviewerAgent, state.event.groupID, reviewerAck, [state.plannerAgent.imAgentUserID]);
+        const reviewTask = `请审查下面的实现，重点关注正确性、边界条件、类型设计、可维护性，并给出是否可交付的结论。\n\n用户任务：\n${state.cleanTask}\n\nCoder 输出：\n${state.workerOutput}`;
+        const reviewerResult = await buildGraphNodeReply(state.reviewerAgent, {
+          ...state.event,
+          sendID: state.plannerAgent.imAgentUserID,
+          recvID: state.reviewerAgent.imAgentUserID,
+          content: reviewTask,
+          serverMsgID: '',
+        }, { runID: `${state.runID}_reviewer`, workspaceID: state.runID, allowTools: true });
+        const taggedToolCalls = tagToolCalls(reviewerResult.toolCalls || [], 'reviewer', state.reviewerAgent);
+        const reviewerResultMsg = await sendGroupText(
+          state.reviewerAgent,
+          state.event.groupID,
+          `@${state.plannerAgent.nickname} 我完成审查：\n\n${reviewerResult.content}`,
+          [state.plannerAgent.imAgentUserID],
+        );
+        const nodeEndTime = Date.now();
+        return {
+          reviewTask,
+          reviewerOutput: reviewerResult.content,
+          toolCalls: taggedToolCalls,
+          graphSteps: [
+            {
+              node: 'planner_review_request',
+              agentID: state.plannerAgent.userAgentID,
+              agentUserID: state.plannerAgent.imAgentUserID,
+              agentNickname: state.plannerAgent.nickname,
+              output: plannerReviewRequest,
+              serverMsgID: reviewRequestMsg.serverMsgID,
+              startTime: nodeStartTime,
+              endTime: nodeStartTime,
+              time: nodeStartTime,
+            },
+            {
+              node: 'reviewer_ack',
+              agentID: state.reviewerAgent.userAgentID,
+              agentUserID: state.reviewerAgent.imAgentUserID,
+              agentNickname: state.reviewerAgent.nickname,
+              output: reviewerAck,
+              serverMsgID: reviewerAckMsg.serverMsgID,
+              startTime: nodeStartTime,
+              endTime: nodeStartTime,
+              time: nodeStartTime,
+            },
+            {
+              node: 'reviewer',
+              agentID: state.reviewerAgent.userAgentID,
+              agentUserID: state.reviewerAgent.imAgentUserID,
+              agentNickname: state.reviewerAgent.nickname,
+              output: reviewerResult.content,
+              serverMsgID: reviewerResultMsg.serverMsgID,
+              provider: reviewerResult.provider,
+              endpoint: reviewerResult.endpoint,
+              model: reviewerResult.model,
+              toolCalls: taggedToolCalls,
+              toolCallIDs: taggedToolCalls.map((call) => call.toolCallID).filter(Boolean),
+              startTime: nodeStartTime,
+              endTime: nodeEndTime,
+              time: nodeEndTime,
+            },
+          ],
+        };
+      },
+      summary: async (state) => {
+        const nodeStartTime = Date.now();
+        const summaryTask = `Coder 已完成代码实现${state.reviewerOutput ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${state.cleanTask}\n\nCoder 输出：\n${state.workerOutput}${state.reviewerOutput ? `\n\nReviewer 输出：\n${state.reviewerOutput}` : ''}`;
+        const summaryResult = await buildGraphNodeReply(state.plannerAgent, {
+          ...state.event,
+          content: summaryTask,
+        });
+        const finalText = `@${state.event.sendID} ${summaryResult.content}`;
+        const finalMsg = await sendGroupText(state.plannerAgent, state.event.groupID, finalText, [state.event.sendID]);
+        const nodeEndTime = Date.now();
+        return {
+          finalOutput: finalText,
+          responseServerMsgID: finalMsg.serverMsgID,
+          graphSteps: [{
+            node: 'summary',
+            agentID: state.plannerAgent.userAgentID,
+            agentUserID: state.plannerAgent.imAgentUserID,
+            agentNickname: state.plannerAgent.nickname,
+            output: summaryResult.content,
+            serverMsgID: finalMsg.serverMsgID,
+            provider: summaryResult.provider,
+            endpoint: summaryResult.endpoint,
+            model: summaryResult.model,
+            startTime: nodeStartTime,
+            endTime: nodeEndTime,
+            time: nodeEndTime,
+          }],
+        };
+      },
+    },
+  });
+
+  const endTime = Date.now();
+  const toolCalls = normalizeToolCalls(graphResult.toolCalls || []);
+  const result = {
+    content: graphResult.finalOutput,
+    mode: 'langgraph-supervisor',
+    runtime: 'langgraph-supervisor',
+    status: 'success',
+    provider: plannerAgent.provider || '',
+    endpoint: plannerAgent.endpoint || '',
+    model: plannerAgent.model || '',
+    toolCalls,
+    graphSteps: normalizeGraphSteps(graphResult.graphSteps || []),
+    artifacts: buildArtifactsFromToolCalls(toolCalls),
+    approvals: [],
+    error: '',
+    workerAgentID: workerAgent.userAgentID,
+    workerAgentUserID: workerAgent.imAgentUserID,
+    workerTemplateID: workerAgent.templateID,
+    workerOutput: graphResult.workerOutput,
+    finalOutput: graphResult.finalOutput,
+  };
+
+  const runs = await store.readCollection('agent-runs');
+  runs.push(buildRunRecord({
+    runID,
+    responseServerMsgID: graphResult.responseServerMsgID,
+    output: {
+      sendID: plannerAgent.imAgentUserID,
+      recvID: event.sendID,
+      groupID: event.groupID,
+      content: graphResult.finalOutput,
+      serverMsgID: graphResult.responseServerMsgID,
+    },
+    agent: plannerAgent,
+    event,
+    result,
+    startTime,
+    endTime,
+  }));
+  await store.writeCollection('agent-runs', runs);
+}
+
+function tagToolCalls(toolCalls, graphNode, agent) {
+  return toolCalls.map((call) => ({
+    ...call,
+    graphNode,
+    agentID: agent.userAgentID,
+    agentUserID: agent.imAgentUserID,
+    agentNickname: agent.nickname,
+  }));
+}
+
+async function sendGroupText(agent, groupID, content, atUserIDList = []) {
+  return imClient.sendMessage({
+    sendID: agent.imAgentUserID,
+    groupID,
+    content,
+    atUserIDList,
+    senderNickname: agent.nickname,
+    senderFaceURL: agent.avatarURL,
+  });
+}
+
+function stripMentionText(content, names) {
+  let text = content;
+  for (const name of names) {
+    text = text.replaceAll(`@${name}`, '');
+  }
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/请组织\s*和\s*做/g, '请做')
+    .replace(/请组织\s*和\s*完成/g, '请完成')
+    .replace(/请让\s*写/g, '请写')
+    .replace(/让\s*写/g, '写')
+    .trim();
 }
 
 function chunkText(text, size) {
@@ -347,29 +900,43 @@ async function buildAgentReplyForRuntime(agent, event, runContext = {}) {
 
 async function buildAgentReply(agent, event, runContext = {}) {
   try {
-    const result = await generateAgentReply(config, agent, event, {
-      toolExecutor: (toolID, args, context) => executeToolCall(toolID, args, {
-        ...context,
-        imClient,
-        runContext,
-        enabledToolIDs: agent.enabledToolIDs || [],
-        delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
-      }),
+    return await generateLangChainAgentReply(config, agent, event, {
+      runID: runContext.runID,
+      workspaceID: runContext.workspaceID,
+      imClient,
+      delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
     });
-    return { ...result, mode: 'provider', status: 'success', error: '' };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Provider completion failed';
-    console.error('Provider completion failed, falling back to mock reply', message);
-    return {
-      content: `${agent.nickname} 暂时无法连接模型，已收到你的消息：${event.content}`,
-      mode: 'fallback',
-      status: 'failed',
-      provider: agent.provider || '',
-      endpoint: agent.endpoint || '',
-      model: agent.model || '',
-      toolCalls: [],
-      error: message,
-    };
+    const message = err instanceof Error ? err.message : 'LangChain agent failed';
+    console.error('LangChain agent failed, falling back to provider loop', message);
+    try {
+      const result = await generateAgentReply(config, agent, event, {
+        toolExecutor: (toolID, args, context) => executeToolCall(toolID, args, {
+          ...context,
+          imClient,
+          runContext,
+          workspaceRoot: config.workspaceRoot,
+          runID: runContext.runID,
+          workspaceID: runContext.workspaceID,
+          enabledToolIDs: agent.enabledToolIDs || [],
+          delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
+        }),
+      });
+      return { ...result, mode: 'provider', status: 'success', error: '' };
+    } catch (fallbackErr) {
+      const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : message;
+      console.error('Provider completion failed, falling back to mock reply', fallbackMessage);
+      return {
+        content: `${agent.nickname} 暂时无法连接模型，已收到你的消息：${event.content}`,
+        mode: 'fallback',
+        status: 'failed',
+        provider: agent.provider || '',
+        endpoint: agent.endpoint || '',
+        model: agent.model || '',
+        toolCalls: [],
+        error: fallbackMessage,
+      };
+    }
   }
 }
 
@@ -519,7 +1086,14 @@ function buildRunRecord({
   startTime,
   endTime,
 }) {
-  const childrenRunIDs = (result.toolCalls || [])
+  const normalizedToolCalls = normalizeToolCalls(result.toolCalls || []);
+  const normalizedGraphSteps = normalizeGraphSteps(result.graphSteps || []);
+  const artifacts = normalizeArtifacts([
+    ...buildArtifactsFromToolCalls(normalizedToolCalls),
+    ...(result.artifacts || []),
+  ]);
+  const approvals = normalizeApprovals(result.approvals || []);
+  const childrenRunIDs = normalizedToolCalls
     .map((call) => call.result?.childRunID)
     .filter(Boolean);
   return {
@@ -535,6 +1109,9 @@ function buildRunRecord({
     imAgentUserID: agent.imAgentUserID,
     ownerUserID: agent.ownerUserID,
     conversationID: event.conversationID,
+    groupID: event.groupID,
+    triggeredByMention: event.groupID ? event.atUserIDList?.includes(agent.imAgentUserID) : false,
+    mentionedAgentIDs: event.mentionedAgentIDs || [],
     requestServerMsgID: event.serverMsgID,
     responseServerMsgID,
     status: result.status,
@@ -543,7 +1120,7 @@ function buildRunRecord({
     provider: result.provider,
     endpoint: result.endpoint,
     model: result.model,
-    graphSteps: result.graphSteps || [],
+    graphSteps: normalizedGraphSteps,
     workerAgentID: result.workerAgentID || '',
     workerAgentUserID: result.workerAgentUserID || '',
     workerTemplateID: result.workerTemplateID || '',
@@ -552,12 +1129,16 @@ function buildRunRecord({
     input: {
       sendID: event.sendID,
       recvID: event.recvID,
+      groupID: event.groupID,
       content: event.content,
       contentType: event.contentType,
       serverMsgID: event.serverMsgID,
     },
     output,
-    toolCalls: result.toolCalls,
+    toolCalls: normalizedToolCalls,
+    artifacts,
+    approvals,
+    patchProposal: result.patchProposal || null,
     error: result.error,
     startTime,
     endTime,
@@ -579,6 +1160,14 @@ async function requireUserAgent(userAgentID) {
   return agent;
 }
 
+async function requireAgentRun(userAgentID, runID) {
+  await requireUserAgent(userAgentID);
+  const runs = await store.readCollection('agent-runs');
+  const index = runs.findIndex((item) => item.userAgentID === userAgentID && item.runID === runID);
+  if (index === -1) throw new HttpError(404, 'Run not found');
+  return { runs, run: runs[index], index };
+}
+
 async function requireWorkerAgent(plannerAgent, body) {
   const userAgents = await store.readCollection('user-agents');
   const worker = findDelegationTarget(userAgents, plannerAgent, {
@@ -589,7 +1178,21 @@ async function requireWorkerAgent(plannerAgent, body) {
   return worker;
 }
 
-async function buildGraphNodeReply(agent, event) {
+async function findOptionalAgent(sourceAgent, templateID) {
+  const userAgents = await store.readCollection('user-agents');
+  return findDelegationTarget(userAgents, sourceAgent, { templateID }) || null;
+}
+
+async function buildGraphNodeReply(agent, event, options = {}) {
+  if (options.allowTools) {
+    const result = await buildAgentReply(agent, event, {
+      runID: options.runID || `graph_${randomUUID()}`,
+      workspaceID: options.workspaceID,
+      allowDelegate: false,
+      depth: 1,
+    });
+    return { ...result, mode: result.mode || 'langchain-agent', status: result.status || 'success', error: result.error || '' };
+  }
   const result = await generateAgentReply(config, {
     ...agent,
     enabledToolIDs: [],
@@ -612,7 +1215,7 @@ function sanitizeAgentUpdates(body) {
   ]) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
   }
-  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker'].includes(updates.runtime)) {
+  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor'].includes(updates.runtime)) {
     delete updates.runtime;
   }
   if (Array.isArray(body.enabledToolIDs)) {
