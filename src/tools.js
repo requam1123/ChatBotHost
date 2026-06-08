@@ -488,6 +488,7 @@ function runProcess(command, args, options) {
       env: {
         ...process.env,
         CI: '1',
+        GIT_CEILING_DIRECTORIES: dirname(options.cwd),
         NO_COLOR: '1',
         npm_config_update_notifier: 'false',
       },

@@ -242,6 +242,7 @@ const routes = [
         secretRefID: body.secretRefID || '',
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
         runtime: body.runtime || template.defaultRuntime || 'openai-tools',
+        localAgentProvider: body.localAgentProvider || template.defaultLocalAgentProvider || '',
         workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
         workerAgentUserID: body.workerAgentUserID || '',
         status: 'active',
@@ -268,6 +269,17 @@ const routes = [
     pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/test$/,
     handler: async ({ params, body }) => {
       const agent = await requireUserAgent(params.userAgentID);
+      const runtime = body.runtime || agent.runtime;
+      if (runtime === 'local-cli-agent') {
+        const provider = body.localAgentProvider || agent.localAgentProvider || inferLocalAgentProvider(agent);
+        return {
+          ok: ['codex', 'claude', 'opencode'].includes(provider),
+          provider: 'local-cli',
+          endpoint: '',
+          model: provider,
+          message: `Local CLI provider configured: ${provider}`,
+        };
+      }
       return testAgentProvider(config, agent, body);
     },
   },
@@ -387,6 +399,38 @@ async function runMockAgentReply(runID, agent, event) {
     allowDelegate: true,
   });
   const replyText = result.content;
+  if (result.runtime === 'local-cli-agent') {
+    const sent = await imClient.sendMessage({
+      sendID: agent.imAgentUserID,
+      recvID: event.groupID ? undefined : event.sendID,
+      groupID: event.groupID || undefined,
+      content: replyText,
+      senderNickname: agent.nickname,
+      senderFaceURL: agent.avatarURL,
+    });
+    const serverMsgID = sent.serverMsgID;
+    if (!serverMsgID) throw new Error('IM send_msg did not return serverMsgID');
+    const runs = await store.readCollection('agent-runs');
+    const endTime = Date.now();
+    runs.push(buildRunRecord({
+      runID,
+      responseServerMsgID: serverMsgID,
+      output: {
+        sendID: agent.imAgentUserID,
+        recvID: event.sendID,
+        groupID: event.groupID,
+        content: replyText,
+        serverMsgID,
+      },
+      agent,
+      event,
+      result,
+      startTime,
+      endTime,
+    }));
+    await store.writeCollection('agent-runs', runs);
+    return;
+  }
   const initial = '正在思考...';
   const sent = await imClient.sendMessage({
     sendID: agent.imAgentUserID,
@@ -895,7 +939,89 @@ async function buildAgentReplyForRuntime(agent, event, runContext = {}) {
   if (agent.runtime === 'langgraph-planner-worker') {
     return buildLangGraphAgentReply(agent, event, runContext);
   }
+  if (agent.runtime === 'local-cli-agent') {
+    return buildLocalCliAgentReply(agent, event, runContext);
+  }
   return buildAgentReply(agent, event, runContext);
+}
+
+async function buildLocalCliAgentReply(agent, event, runContext = {}) {
+  const provider = agent.localAgentProvider || inferLocalAgentProvider(agent);
+  const startTime = Date.now();
+  const result = await executeToolCall('local_agent_run', {
+    provider,
+    task: event.content || '',
+    cwd: '.',
+    timeoutMs: 120000,
+  }, {
+    agent,
+    event,
+    imClient,
+    enabledToolIDs: agent.enabledToolIDs || [],
+    workspaceRoot: config.workspaceRoot,
+    runID: runContext.runID,
+    workspaceID: runContext.workspaceID,
+  });
+  const toolCall = {
+    toolCallID: `tool_${randomUUID()}`,
+    toolID: 'local_agent_run',
+    args: {
+      provider,
+      task: event.content || '',
+      cwd: '.',
+      timeoutMs: 120000,
+    },
+    result,
+    startTime,
+    createTime: Date.now(),
+    durationMs: Date.now() - startTime,
+  };
+
+  return {
+    content: summarizeLocalCliResult(provider, result),
+    mode: 'local-cli-agent',
+    runtime: 'local-cli-agent',
+    status: result.ok ? 'success' : 'failed',
+    provider: 'local-cli',
+    endpoint: '',
+    model: provider,
+    toolCalls: [toolCall],
+    error: result.ok ? '' : result.error || result.stderr || 'Local CLI agent failed',
+  };
+}
+
+function inferLocalAgentProvider(agent) {
+  if (agent.templateID === 'claude-code') return 'claude';
+  if (agent.templateID === 'opencode-cli') return 'opencode';
+  return 'codex';
+}
+
+function summarizeLocalCliResult(provider, result) {
+  const files = Array.isArray(result.files) ? result.files : [];
+  const fileLines = files.length
+    ? files.map((file) => `- ${file.status || 'file'} ${file.path || file.targetPath || file.sandboxPath || ''} (${file.bytes ?? '-'} bytes)`).join('\n')
+    : '- no files changed';
+  return [
+    `本地 ${provider} 执行完成。`,
+    '',
+    `exitCode: ${result.exitCode ?? '-'}`,
+    `timedOut: ${Boolean(result.timedOut)}`,
+    '',
+    'files:',
+    fileLines,
+    '',
+    'stdout:',
+    truncateText(result.stdout || '', 1200),
+    '',
+    'stderr:',
+    truncateText(result.stderr || result.error || '', 1200),
+  ].join('\n');
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}\n...[truncated]`;
 }
 
 async function buildAgentReply(agent, event, runContext = {}) {
@@ -1210,13 +1336,17 @@ function sanitizeAgentUpdates(body) {
     'model',
     'systemPrompt',
     'runtime',
+    'localAgentProvider',
     'workerTemplateID',
     'workerAgentUserID',
   ]) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
   }
-  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor'].includes(updates.runtime)) {
+  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor', 'local-cli-agent'].includes(updates.runtime)) {
     delete updates.runtime;
+  }
+  if (updates.localAgentProvider && !['codex', 'claude', 'opencode'].includes(updates.localAgentProvider)) {
+    delete updates.localAgentProvider;
   }
   if (Array.isArray(body.enabledToolIDs)) {
     const validIDs = new Set(listTools().map((tool) => tool.toolID));
