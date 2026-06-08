@@ -386,7 +386,14 @@ function parseMessageEvent(body) {
 
 async function runMockAgentReply(runID, agent, event) {
   if (event.groupID && agent.runtime === 'langgraph-planner-worker') {
-    await runVisibleGroupCollaboration(runID, agent, event);
+    try {
+      if (await handleGroupPlanConfirmation(runID, agent, event)) {
+        return;
+      }
+      await runVisibleGroupCollaboration(runID, agent, event);
+    } catch (err) {
+      await sendGroupCollaborationError(runID, agent, event, err);
+    }
     return;
   }
 
@@ -473,6 +480,134 @@ async function runMockAgentReply(runID, agent, event) {
   await store.writeCollection('agent-runs', runs);
 }
 
+async function handleGroupPlanConfirmation(runID, plannerAgent, event) {
+  const pendingPlans = await store.readCollection('pending-plans');
+  const pendingIndex = findLatestPendingPlanIndex(pendingPlans, plannerAgent, event);
+
+  if (pendingIndex >= 0 && isPlanConfirmation(event.content)) {
+    const pending = pendingPlans[pendingIndex];
+    pendingPlans[pendingIndex] = {
+      ...pending,
+      status: 'approved',
+      approvedServerMsgID: event.serverMsgID,
+      approvedTime: Date.now(),
+    };
+    await store.writeCollection('pending-plans', pendingPlans);
+    await runVisibleGroupCollaboration(runID, plannerAgent, {
+      ...event,
+      content: pending.task,
+    });
+    return true;
+  }
+
+  if (!wantsPlanConfirmation(event.content)) return false;
+
+  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
+  const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
+  const cleanTask = stripMentionText(event.content, mentionNames);
+  const planText = [
+    `@${event.sendID} 收到，我先给方案，等你确认后再让 ${workerAgent.nickname} 开始实现。`,
+    '',
+    '方案：',
+    '1. 做一个简单计算器的最小可用版本，先支持加、减、乘、除。',
+    '2. 交付一个单文件实现，包含清晰输入、计算逻辑和基础错误处理。',
+    '3. 由执行 Agent 在 sandbox 内生成文件并做一次最小验证。',
+    '4. 生成完成后我汇总结果；真实写入仓库仍走 Patch 审批。',
+    '',
+    `执行 Agent：${workerAgent.nickname}`,
+    '',
+    '请回复 @Planner Agent 确认开始，我再继续执行。',
+  ].join('\n');
+  const sent = await sendGroupText(plannerAgent, event.groupID, planText, [event.sendID]);
+  const now = Date.now();
+  pendingPlans.push({
+    pendingPlanID: `pending_${randomUUID()}`,
+    status: 'pending',
+    runID,
+    ownerUserID: plannerAgent.ownerUserID,
+    groupID: event.groupID,
+    plannerAgentID: plannerAgent.userAgentID,
+    plannerAgentUserID: plannerAgent.imAgentUserID,
+    requesterID: event.sendID,
+    requestServerMsgID: event.serverMsgID,
+    responseServerMsgID: sent.serverMsgID,
+    workerAgentID: workerAgent.userAgentID,
+    workerAgentUserID: workerAgent.imAgentUserID,
+    task: cleanTask,
+    planText,
+    createTime: now,
+  });
+  await store.writeCollection('pending-plans', pendingPlans);
+
+  const runs = await store.readCollection('agent-runs');
+  runs.push(buildRunRecord({
+    runID,
+    responseServerMsgID: sent.serverMsgID,
+    output: {
+      sendID: plannerAgent.imAgentUserID,
+      recvID: event.sendID,
+      groupID: event.groupID,
+      content: planText,
+      serverMsgID: sent.serverMsgID,
+    },
+    agent: plannerAgent,
+    event,
+    result: {
+      content: planText,
+      mode: 'langgraph-visible',
+      runtime: 'langgraph-planner-worker',
+      status: 'success',
+      provider: plannerAgent.provider || '',
+      endpoint: plannerAgent.endpoint || '',
+      model: plannerAgent.model || '',
+      toolCalls: [],
+      graphSteps: [{
+        node: 'planner_plan_confirmation',
+        agentID: plannerAgent.userAgentID,
+        agentUserID: plannerAgent.imAgentUserID,
+        agentNickname: plannerAgent.nickname,
+        output: planText,
+        serverMsgID: sent.serverMsgID,
+        startTime: now,
+        endTime: now,
+        time: now,
+      }],
+      workerAgentID: workerAgent.userAgentID,
+      workerAgentUserID: workerAgent.imAgentUserID,
+      workerTemplateID: workerAgent.templateID,
+      finalOutput: planText,
+      error: '',
+    },
+    startTime: now,
+    endTime: now,
+  }));
+  await store.writeCollection('agent-runs', runs);
+  return true;
+}
+
+function findLatestPendingPlanIndex(pendingPlans, plannerAgent, event) {
+  for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
+    const plan = pendingPlans[index];
+    if (
+      plan.status === 'pending' &&
+      plan.groupID === event.groupID &&
+      plan.plannerAgentID === plannerAgent.userAgentID &&
+      plan.requesterID === event.sendID
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function wantsPlanConfirmation(content) {
+  return /确认后|确认之后|先.*方案|先.*计划|让我确认|等.*确认/.test(content || '');
+}
+
+function isPlanConfirmation(content) {
+  return /确认|同意|开始|执行|可以|按这个/.test(content || '');
+}
+
 async function runVisibleGroupCollaboration(runID, plannerAgent, event) {
   if (langGraphSupervisorRuntime.available && langGraphSupervisorRuntime.runVisibleSupervisorGraph) {
     try {
@@ -487,11 +622,7 @@ async function runVisibleGroupCollaboration(runID, plannerAgent, event) {
 
 async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
   const startTime = Date.now();
-  const workerAgent = await requireWorkerAgent(plannerAgent, {
-    agentUserID: plannerAgent.workerAgentUserID || '',
-    templateID: plannerAgent.workerTemplateID || 'coder',
-  });
-  const reviewerAgent = await findOptionalAgent(plannerAgent, 'reviewer');
+  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
 
   const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
   const cleanTask = stripMentionText(event.content, mentionNames);
@@ -638,11 +769,7 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
 
 async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event) {
   const startTime = Date.now();
-  const workerAgent = await requireWorkerAgent(plannerAgent, {
-    agentUserID: plannerAgent.workerAgentUserID || '',
-    templateID: plannerAgent.workerTemplateID || 'coder',
-  });
-  const reviewerAgent = await findOptionalAgent(plannerAgent, 'reviewer');
+  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
   const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
   const cleanTask = stripMentionText(event.content, mentionNames);
 
@@ -657,8 +784,8 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
     nodes: {
       plannerAck: async (state) => {
         const plannerAck = state.reviewerAgent
-          ? `@${state.event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我再 @Reviewer 做代码审查\n4. 我最后 @${state.event.sendID} 汇总最终结果`
-          : `@${state.event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我最后 @${state.event.sendID} 汇总最终结果`;
+          ? `@${state.event.sendID} 收到，我先规划一下：\n1. 我会先确认需求和方案\n2. 执行交给 ${state.workerAgent.nickname}\n3. ${state.workerAgent.nickname} 完成后 @我 回传结果\n4. 我再 @Reviewer 做审查\n5. 我最后 @${state.event.sendID} 汇总最终结果`
+          : `@${state.event.sendID} 收到，我先规划一下：\n1. 我会先确认需求和方案\n2. 执行交给 ${state.workerAgent.nickname}\n3. ${state.workerAgent.nickname} 完成后 @我 回传结果\n4. 我最后 @${state.event.sendID} 汇总最终结果`;
         const sent = await sendGroupText(state.plannerAgent, state.event.groupID, plannerAck, [state.event.sendID]);
         const time = Date.now();
         return {
@@ -679,12 +806,12 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
       plannerDelegate: async (state) => {
         const plannerDelegate = `@${state.workerAgent.nickname} 请完成这个代码任务：${state.cleanTask}`;
         const delegateMsg = await sendGroupText(state.plannerAgent, state.event.groupID, plannerDelegate, [state.workerAgent.imAgentUserID]);
-        const coderAck = `@${state.plannerAgent.nickname} 收到，我开始实现这个函数，并会把代码结果回传给你。`;
-        const ackMsg = await sendGroupText(state.workerAgent, state.event.groupID, coderAck, [state.plannerAgent.imAgentUserID]);
+        const workerAck = `@${state.plannerAgent.nickname} 收到，我开始执行，并会把结果回传给你。`;
+        const ackMsg = await sendGroupText(state.workerAgent, state.event.groupID, workerAck, [state.plannerAgent.imAgentUserID]);
         const time = Date.now();
         return {
           plannerDelegate,
-          coderAck,
+          workerAck,
           workerTask: `请完成用户交给 Planner 的代码任务，并只输出可用代码和必要说明。\n\n用户任务：\n${state.cleanTask}`,
           graphSteps: [
             {
@@ -703,7 +830,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
               agentID: state.workerAgent.userAgentID,
               agentUserID: state.workerAgent.imAgentUserID,
               agentNickname: state.workerAgent.nickname,
-              output: coderAck,
+              output: workerAck,
               serverMsgID: ackMsg.serverMsgID,
               startTime: time,
               endTime: time,
@@ -722,8 +849,8 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
           serverMsgID: '',
         }, { runID: `${state.runID}_worker`, workspaceID: state.runID, allowTools: true });
         const taggedToolCalls = tagToolCalls(workerResult.toolCalls || [], 'worker', state.workerAgent);
-        const coderResultText = `@${state.plannerAgent.nickname} 我完成了代码实现：\n\n${workerResult.content}`;
-        const resultMsg = await sendGroupText(state.workerAgent, state.event.groupID, coderResultText, [state.plannerAgent.imAgentUserID]);
+        const workerResultText = `@${state.plannerAgent.nickname} 我完成了执行：\n\n${workerResult.content}`;
+        const resultMsg = await sendGroupText(state.workerAgent, state.event.groupID, workerResultText, [state.plannerAgent.imAgentUserID]);
         const nodeEndTime = Date.now();
         return {
           workerOutput: workerResult.content,
@@ -752,7 +879,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
         const reviewRequestMsg = await sendGroupText(state.plannerAgent, state.event.groupID, plannerReviewRequest, [state.reviewerAgent.imAgentUserID]);
         const reviewerAck = `@${state.plannerAgent.nickname} 收到，我开始审查 Coder 的代码。`;
         const reviewerAckMsg = await sendGroupText(state.reviewerAgent, state.event.groupID, reviewerAck, [state.plannerAgent.imAgentUserID]);
-        const reviewTask = `请审查下面的实现，重点关注正确性、边界条件、类型设计、可维护性，并给出是否可交付的结论。\n\n用户任务：\n${state.cleanTask}\n\nCoder 输出：\n${state.workerOutput}`;
+        const reviewTask = `请审查下面的实现，重点关注正确性、边界条件、类型设计、可维护性，并给出是否可交付的结论。\n\n用户任务：\n${state.cleanTask}\n\n${state.workerAgent.nickname} 输出：\n${state.workerOutput}`;
         const reviewerResult = await buildGraphNodeReply(state.reviewerAgent, {
           ...state.event,
           sendID: state.plannerAgent.imAgentUserID,
@@ -816,7 +943,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
       },
       summary: async (state) => {
         const nodeStartTime = Date.now();
-        const summaryTask = `Coder 已完成代码实现${state.reviewerOutput ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${state.cleanTask}\n\nCoder 输出：\n${state.workerOutput}${state.reviewerOutput ? `\n\nReviewer 输出：\n${state.reviewerOutput}` : ''}`;
+        const summaryTask = `${state.workerAgent.nickname} 已完成代码实现${state.reviewerOutput ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${state.cleanTask}\n\n${state.workerAgent.nickname} 输出：\n${state.workerOutput}${state.reviewerOutput ? `\n\nReviewer 输出：\n${state.reviewerOutput}` : ''}`;
         const summaryResult = await buildGraphNodeReply(state.plannerAgent, {
           ...state.event,
           content: summaryTask,
@@ -907,6 +1034,53 @@ async function sendGroupText(agent, groupID, content, atUserIDList = []) {
     senderNickname: agent.nickname,
     senderFaceURL: agent.avatarURL,
   });
+}
+
+async function sendGroupCollaborationError(runID, plannerAgent, event, err) {
+  const message = err instanceof Error ? err.message : '群聊协作启动失败';
+  const content = `@${event.sendID} ${message}`;
+  const sent = await sendGroupText(plannerAgent, event.groupID, content, [event.sendID]);
+  const now = Date.now();
+  const runs = await store.readCollection('agent-runs');
+  runs.push(buildRunRecord({
+    runID,
+    responseServerMsgID: sent.serverMsgID,
+    output: {
+      sendID: plannerAgent.imAgentUserID,
+      recvID: event.sendID,
+      groupID: event.groupID,
+      content,
+      serverMsgID: sent.serverMsgID,
+    },
+    agent: plannerAgent,
+    event,
+    result: {
+      content,
+      mode: 'langgraph-visible',
+      runtime: plannerAgent.runtime || 'langgraph-planner-worker',
+      status: 'failed',
+      provider: plannerAgent.provider || '',
+      endpoint: plannerAgent.endpoint || '',
+      model: plannerAgent.model || '',
+      toolCalls: [],
+      graphSteps: [{
+        node: 'planner_error',
+        agentID: plannerAgent.userAgentID,
+        agentUserID: plannerAgent.imAgentUserID,
+        agentNickname: plannerAgent.nickname,
+        output: content,
+        serverMsgID: sent.serverMsgID,
+        startTime: now,
+        endTime: now,
+        time: now,
+      }],
+      finalOutput: content,
+      error: message,
+    },
+    startTime: now,
+    endTime: now,
+  }));
+  await store.writeCollection('agent-runs', runs);
 }
 
 function stripMentionText(content, names) {
@@ -1304,6 +1478,56 @@ async function requireWorkerAgent(plannerAgent, body) {
   return worker;
 }
 
+async function resolveGroupCollaborationAgents(plannerAgent, event) {
+  const userAgents = await store.readCollection('user-agents');
+  const groupAgents = await findGroupAgents(plannerAgent, event, userAgents);
+  const mentionedWorker = groupAgents.find((agent) =>
+    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
+    agent.templateID !== 'reviewer' &&
+    event.atUserIDList?.includes(agent.imAgentUserID)
+  );
+  const localCliWorker = groupAgents.find((agent) =>
+    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
+    agent.templateID !== 'reviewer' &&
+    agent.runtime === 'local-cli-agent'
+  );
+  const coderWorker = groupAgents.find((agent) =>
+    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
+    agent.templateID === 'coder'
+  );
+  const anyWorker = groupAgents.find((agent) =>
+    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
+    agent.templateID !== 'reviewer'
+  );
+  const groupWorker = mentionedWorker || localCliWorker || coderWorker || anyWorker;
+  if (event.groupID && !groupWorker) {
+    throw new HttpError(400, '这个群里还没有可执行的 Agent。请先把 Claude Code、Codex CLI、OpenCode 或 Coder 拉进群，再 @Planner Agent 分配任务。');
+  }
+  const workerAgent = groupWorker || await requireWorkerAgent(plannerAgent, {
+    agentUserID: plannerAgent.workerAgentUserID || '',
+    templateID: plannerAgent.workerTemplateID || 'coder',
+  });
+  const reviewerAgent = event.groupID
+    ? groupAgents.find((agent) => agent.templateID === 'reviewer') || null
+    : await findOptionalAgent(plannerAgent, 'reviewer');
+  return { workerAgent, reviewerAgent };
+}
+
+async function findGroupAgents(plannerAgent, event, userAgents) {
+  if (!event.groupID) return [];
+  try {
+    const members = await imClient.getGroupMembers(event.groupID, plannerAgent.ownerUserID);
+    const memberIDs = new Set(members.map((member) => member.userID).filter(Boolean));
+    return userAgents.filter((agent) =>
+      agent.ownerUserID === plannerAgent.ownerUserID &&
+      memberIDs.has(agent.imAgentUserID)
+    );
+  } catch (err) {
+    console.error('Failed to resolve group agents', err);
+    return [];
+  }
+}
+
 async function findOptionalAgent(sourceAgent, templateID) {
   const userAgents = await store.readCollection('user-agents');
   return findDelegationTarget(userAgents, sourceAgent, { templateID }) || null;
@@ -1311,7 +1535,7 @@ async function findOptionalAgent(sourceAgent, templateID) {
 
 async function buildGraphNodeReply(agent, event, options = {}) {
   if (options.allowTools) {
-    const result = await buildAgentReply(agent, event, {
+    const result = await buildAgentReplyForRuntime(agent, event, {
       runID: options.runID || `graph_${randomUUID()}`,
       workspaceID: options.workspaceID,
       allowDelegate: false,

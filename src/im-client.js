@@ -42,6 +42,12 @@ export class ImClient {
     }, agentToken, { tolerateStatuses: [404, 409] });
   }
 
+  async getGroupMembers(groupID, requesterUserID) {
+    const token = await this.getToken(requesterUserID);
+    const data = await this.post('/group/get_group_members', { groupID }, token);
+    return Array.isArray(data.members) ? data.members : [];
+  }
+
   async sendMessage({ sendID, recvID, groupID, content, senderNickname, senderFaceURL, atUserIDList = [], contentType }) {
     const token = await this.getToken(sendID);
     return this.post('/msg/send_msg', {
