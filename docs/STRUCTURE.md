@@ -49,7 +49,7 @@ Lightweight HTTP server + JSON API framework.
 ## Data layer
 
 ### `src/market.js`
-Agent template catalog. Hardcoded templates:
+Agent template catalog. Each template provides default system prompt, tool IDs, and runtime. Model, provider, and endpoint are determined by the credential selected when creating an agent instance.
 
 | TemplateID | Role | Default Runtime |
 |------------|------|-----------------|
@@ -107,7 +107,7 @@ Diff-based patch proposal/apply workflow.
 ### `src/providers.js`
 OpenAI-compatible LLM provider integration.
 
-- `resolveProviderConfig(store, agent)` — **async** — looks up `agent.credentialID` in the credentials collection, falls back to `anonymous`. Returns `{ provider, baseURL, apiKey, model }`.
+- `resolveProviderConfig(store, agent)` — **async** — looks up `agent.credentialID` in the credentials collection, falls back to `anonymous`. Returns `{ provider, baseURL, apiKey, model }` where model comes from the credential's `modelName`.
 - `generateAgentReply(store, agent, event, options)` — main LLM chat loop with tool-call support (max 3 rounds)
 - `testAgentProvider(store, agent, overrides)` — connectivity test
 - `callOpenAICompatible()` — sends `POST .../chat/completions`, handles tool-call responses
@@ -157,27 +157,50 @@ WebSocket client for IM push events.
 ## Entry point
 
 ### `src/index.js`
-Main server. **~2000 lines** — the largest file.
+Main server entry (~860 lines). Routes, initialization, and glue logic.
 
 **Startup sequence:**
 1. `loadConfig()` — read env vars
 2. `new JsonStore(config.storageDir)` — initialize file storage
 3. `new ImClient(config.imServerBaseURL)` — IM REST client
 4. `createLangGraphRuntime()` / `createLangGraphSupervisorRuntime()` — dynamic runtime loading
-5. `seedData(store)` — bootstrap anonymous credentials + agents if missing
-6. `createJsonServer(routes).listen(config.port)` — start HTTP
+5. `initReplyServices()` / `initGroupCollaborationServices()` — inject shared dependencies
+6. `seedData(store)` — bootstrap anonymous credentials + agents if missing
+7. `createJsonServer(routes).listen(config.port)` — start HTTP
 
 **29 API routes** — see `API.md` for full reference.
 
 **Key internal functions:**
 - `handleIncomingMessage(payload)` — WebSocket message → event parsing → dispatch
-- `runMockAgentReply(runID, agent, event)` — main agent reply pipeline
-- `buildAgentReplyForRuntime(agent, event, runContext)` — runtime dispatcher
-- `buildAgentReply(agent, event, runContext)` — LangChain → provider → mock fallback chain
-- `delegateToAgent()` — inter-agent task delegation
-- `buildGraphNodeReply()` — LangGraph node reply generation
-- `resolveGroupCollaborationAgents()` — group member agent discovery
-- Various group collaboration flows: plan confirmation, visible collaboration, supervisor-based
+- `createCredential()` / `requireCredential()` — credential CRUD helpers
+- `sanitizeAgentUpdates()` — whitelist-based PATCH body validator
+- `requireUserAgent()` / `requireAgentRun()` — entity lookup with 404 throwing
+
+### `src/agent-reply.js`
+Agent reply pipeline (~400 lines). Handles the core reply flow:
+
+- `runMockAgentReply()` — main reply entry: workspace resolution, IM streaming, run recording
+- `buildAgentReplyForRuntime()` — dispatches to LangChain, provider loop, or mock fallback
+- `buildGraphNodeReply()` — reply generation for graph nodes (planner/worker/reviewer)
+- `delegateToAgent()` — inter-agent task delegation with run recording
+- `buildRunRecord()` / `attachWorkspaceResult()` — run record construction helpers
+- `findDelegationTarget()` / `requireWorkerAgent()` — agent discovery utilities
+
+### `src/group-collaboration.js`
+Group chat collaboration logic (~750 lines). Multi-agent orchestration:
+
+- `runVisibleGroupCollaboration()` — dispatcher: prefers LangGraph Supervisor, falls back to legacy
+- `runVisibleGroupCollaborationWithSupervisor()` — LangGraph-based planner→worker→reviewer pipeline with visible IM progress
+- `runVisibleGroupCollaborationLegacy()` — manual orchestration with IM progress messages
+- `handleGroupPlanConfirmation()` — plan generation + user confirmation flow
+- `resolveGroupCollaborationAgents()` — discovers worker/reviewer agents from group members
+- `sendGroupCollaborationError()` — error notification in group chat
+
+### `src/seed.js`
+Data seeding on first startup (~70 lines). Creates anonymous credential and agents if missing.
+
+### `src/filesystem.js`
+Local filesystem browsing utilities (~60 lines). Used by `GET /filesystem/directories`.
 
 ---
 
@@ -186,7 +209,7 @@ Main server. **~2000 lines** — the largest file.
 | File | Purpose |
 |------|---------|
 | `credentials.json` | API key storage (credentialID, ownerUserID, name, apiKey, baseUrl, modelName, provider) |
-| `agents.json` | Agent configurations (userAgentID, ownerUserID, templateID, credentialID, model, tools, runtime, etc.) |
+| `agents.json` | Agent configurations (userAgentID, ownerUserID, templateID, credentialID, systemPrompt, tools, runtime, etc.) — model/provider/endpoint come from credential |
 | `agent-runs.json` | Execution history (runID, agent, event, toolCalls, artifacts, approvals, duration) |
 | `pending-plans.json` | Group plan confirmations awaiting user approval |
 | `workspaces.json` | Workspace records (sandbox path, target path, owner) |

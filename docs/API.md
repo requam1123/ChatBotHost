@@ -95,7 +95,7 @@ Create a credential.
 | `apiKey` | body | **Yes** | |
 | `baseUrl` | body | **Yes** | e.g. `https://api.openai.com/v1` |
 | `name` | body | No | Display name for the credential |
-| `modelName` | body | No | Default model for this credential |
+| `modelName` | body | **Yes** | Model name, e.g. `gpt-4o-mini` |
 | `provider` | body | No | Default `"openai"` |
 
 ### `GET /credentials/:credentialID?ownerUserID=xxx`
@@ -118,7 +118,7 @@ Must be owned by the user.
 
 ## Agents
 
-> Agent objects are stored in the `agents` collection. Each agent is bound to an owner and references a credential for LLM access.
+> Agent objects are stored in the `agents` collection. Each agent references a credential for LLM access. Model, provider, and endpoint are determined by the credential — not stored on the agent.
 
 **Agent object schema:**
 ```json
@@ -130,7 +130,6 @@ Must be owned by the user.
   "nickname": "Coder Agent",
   "avatarURL": "https://...",
   "credentialID": "cred_xxx",
-  "model": "gpt-4o-mini",
   "systemPrompt": "You are a coding agent...",
   "enabledToolIDs": ["get_current_time", "workspace_read", "workspace_write", "bash"],
   "runtime": "openai-tools",
@@ -162,8 +161,7 @@ Update an agent. Accepted fields (all optional):
 |-------|------|-------|
 | `nickname` | string | |
 | `avatarURL` | string | |
-| `credentialID` | string | Switch which credential to use |
-| `model` | string | e.g. `gpt-4o` |
+| `credentialID` | string | Switch which credential to use (model/provider/endpoint are determined by the credential) |
 | `systemPrompt` | string | |
 | `runtime` | string | Must be one of: `openai-tools`, `langgraph-planner-worker`, `langchain-agent`, `langgraph-supervisor` |
 | `workerTemplateID` | string | |
@@ -182,8 +180,7 @@ Create a new agent instance from a market template.
 | `ownerUserID` | body | **Yes** | — |
 | `nickname` | body | No | Template name |
 | `avatarURL` | body | No | Template avatar |
-| `credentialID` | body | No | `""` (falls back to anonymous credential at reply time) |
-| `model` | body | No | Template default model |
+| `credentialID` | body | No | `""` (falls back to anonymous credential; model/provider/endpoint come from the selected credential) |
 | `systemPrompt` | body | No | Template default prompt |
 | `enabledToolIDs` | body | No | Template default tools |
 | `runtime` | body | No | Template default runtime |

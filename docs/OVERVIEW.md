@@ -76,14 +76,16 @@ platform with LLM-powered AI agents. It:
 
 An **agent** is an AI persona that responds to IM messages. Each agent has:
 
-- A **template** (planner, coder, chatgpt, reviewer) that provides defaults
-- A **credential** that supplies the API key and base URL for LLM calls
-- A **model** selection (e.g. `gpt-4o-mini`)
+- A **template** (planner, coder, chatgpt, reviewer) that provides system prompt and tool defaults
+- A **credential** that supplies the model name, API key, base URL, and provider for LLM calls
 - A set of **enabled tools** (which tools the agent is allowed to call)
 - A **runtime** that determines how tool calls are processed
 
 Agents are created from the marketplace (`POST /market/agents/:templateID/add`)
 and can be customized via `PATCH /my/agents/:userAgentID`.
+
+The model used by an agent is entirely determined by the selected credential.
+A credential's `modelName` is a required field; different model names mean different credentials.
 
 The special user `anonymous` can own agents and credentials that are visible to
 everyone. This allows a "default" setup that all users share.
@@ -101,10 +103,10 @@ A **credential** stores API connection info:
 | `provider` | `openai` |
 
 A complete credential entry consists of `name`, `apiKey`, `baseUrl`, `modelName`, and `provider`.
-If an agent does not specify a model, the credential's `modelName` is used as fallback.
+`modelName` is a required field — if you need a different model, create a different credential.
 Multiple credentials can exist per user. An agent references exactly one credential
 via `credentialID`. At reply time, the system looks up the credential to get the
-API key, base URL, model, and provider for the LLM call.
+model name, API key, base URL, and provider for the LLM call.
 
 Anonymous credentials are readable (but not deletable) by any user.
 
@@ -223,7 +225,7 @@ All data is stored as plain JSON files in the `data/` directory:
 | File | Collection | Schema |
 |------|-----------|--------|
 | `credentials.json` | `credentials` | `{ credentialID, ownerUserID, name, apiKey, baseUrl, modelName, provider, createTime, updateTime }` |
-| `agents.json` | `agents` | `{ userAgentID, ownerUserID, templateID, imAgentUserID, nickname, avatarURL, credentialID, model, systemPrompt, enabledToolIDs, runtime, workerTemplateID, workerAgentUserID, status, createTime, updateTime }` |
+| `agents.json` | `agents` | `{ userAgentID, ownerUserID, templateID, imAgentUserID, nickname, avatarURL, credentialID, systemPrompt, enabledToolIDs, runtime, workerTemplateID, workerAgentUserID, status, createTime, updateTime }` |
 | `agent-runs.json` | `agent-runs` | `{ runID, parentRunID, rootRunID, runType, userAgentID, imAgentUserID, ownerUserID, conversationID, groupID, requestServerMsgID, responseServerMsgID, status, mode, runtime, provider, endpoint, model, toolCalls, artifacts, approvals, graphSteps, output, startTime, endTime, ... }` |
 | `workspaces.json` | `workspaces` | `{ workspaceID, ownerUserID, name, targetPath, sandboxPath, status, createTime, updateTime }` |
 | `conversation-workspaces.json` | `conversation-workspaces` | `{ ownerUserID, conversationID, workspaceID, createTime, updateTime }` |

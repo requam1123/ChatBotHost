@@ -6,12 +6,9 @@ import { JsonStore } from './storage.js';
 import { ImClient } from './im-client.js';
 import { ImWsClient } from './im-ws-client.js';
 import { getTemplate, listActiveTemplates } from './market.js';
-import { testAgentProvider } from './providers.js';
-import { createLangGraphRuntime } from './langgraph-runtime.js';
 import { discoverMcpTools } from './mcp-client.js';
 import { findTools, listTools, toolCatalog } from './tools.js';
 import { applyPatchProposal, createPatchPreview } from './patch-manager.js';
-import { createLangGraphSupervisorRuntime } from './langgraph-supervisor-runtime.js';
 import {
   normalizeArtifacts,
   normalizeApprovals,
@@ -30,27 +27,16 @@ import { listLocalDirectories } from './filesystem.js';
 import {
   initReplyServices,
   runMockAgentReply,
-  buildGraphNodeReply,
-  requireWorkerAgent,
   truncateText,
 } from './agent-reply.js';
-import {
-  initGroupCollaborationServices,
-  handleGroupPlanConfirmation,
-  runVisibleGroupCollaboration,
-  sendGroupCollaborationError,
-} from './group-collaboration.js';
 import { seedData } from './seed.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.storageDir);
 const imClient = new ImClient(config.imServerBaseURL);
 const log = createLogger('server');
-const langGraphRuntime = await createLangGraphRuntime();
-const langGraphSupervisorRuntime = await createLangGraphSupervisorRuntime();
 
-initReplyServices({ store, imClient, config, langGraphRuntime });
-initGroupCollaborationServices({ store, imClient, langGraphSupervisorRuntime });
+initReplyServices({ store, imClient, config });
 
 const wsConnections = new Map();
 
@@ -115,11 +101,7 @@ async function handleIncomingMessage(payload) {
   log.info(`收到 IM 消息: from=${event.sendID}, to=${event.recvID}(${agent.nickname || agent.templateID}), conversation=${event.conversationID}, content="${truncateText(event.content, 80)}"`);
 
   const runID = `run_${randomUUID()}`;
-  void runMockAgentReply(runID, agent, event, {
-    handleGroupPlanConfirmation,
-    runVisibleGroupCollaboration,
-    sendGroupCollaborationError,
-  }).catch((err) => {
+  void runMockAgentReply(runID, agent, event).catch((err) => {
     log.error(`Agent 回复失败: agent=${agent.nickname || agent.templateID}, runID=${runID}`, err);
   });
 }
@@ -134,16 +116,6 @@ const routes = [
       status: 'ok',
       service: 'ChatBotHost',
       imServerBaseURL: config.imServerBaseURL,
-      langGraphRuntime: {
-        available: langGraphRuntime.available,
-        source: langGraphRuntime.source,
-        error: langGraphRuntime.error || '',
-      },
-      langGraphSupervisorRuntime: {
-        available: langGraphSupervisorRuntime.available,
-        source: langGraphSupervisorRuntime.source,
-        error: langGraphSupervisorRuntime.error || '',
-      },
       time: Date.now(),
     }),
   },
@@ -303,7 +275,7 @@ const routes = [
         systemPrompt: typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '',
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : [],
         enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
-        runtime: typeof body.runtime === 'string' ? body.runtime.trim() : 'openai-tools',
+        runtime: typeof body.runtime === 'string' ? body.runtime.trim() : 'langchain-agent',
         workerTemplateID: typeof body.workerTemplateID === 'string' ? body.workerTemplateID.trim() : '',
         workerAgentUserID: typeof body.workerAgentUserID === 'string' ? body.workerAgentUserID.trim() : '',
         status: 'active',
@@ -512,7 +484,7 @@ const routes = [
         systemPrompt: body.systemPrompt || template.defaultSystemPrompt,
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
         enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
-        runtime: body.runtime || template.defaultRuntime || 'openai-tools',
+        runtime: body.runtime || template.defaultRuntime || 'langchain-agent',
         workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
         workerAgentUserID: body.workerAgentUserID || '',
         status: 'active',
@@ -538,58 +510,6 @@ const routes = [
   },
   {
     method: 'POST',
-    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/test$/,
-    handler: async ({ params, body }) => {
-      const agent = await requireUserAgent(params.userAgentID);
-      return testAgentProvider(store, agent, body);
-    },
-  },
-  {
-    method: 'POST',
-    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/graph\/delegate-test$/,
-    handler: async ({ params, body }) => {
-      if (!langGraphRuntime.available || !langGraphRuntime.runPlannerWorkerGraph) {
-        throw new HttpError(503, 'LangGraph runtime is not available');
-      }
-
-      const plannerAgent = await requireUserAgent(params.userAgentID);
-      const workerAgent = await requireWorkerAgent(plannerAgent, body);
-      const task = requiredString(body.task, 'task');
-      const event = {
-        conversationID: typeof body.conversationID === 'string' && body.conversationID.trim()
-          ? body.conversationID.trim()
-          : `graph_${plannerAgent.userAgentID}`,
-        sendID: plannerAgent.ownerUserID,
-        recvID: plannerAgent.imAgentUserID,
-        content: task,
-        serverMsgID: '',
-        contentType: 101,
-      };
-
-      const startTime = Date.now();
-      const result = await langGraphRuntime.runPlannerWorkerGraph({
-        task,
-        context: typeof body.context === 'string' ? body.context : '',
-        plannerAgent,
-        workerAgent,
-        event,
-        generateReply: (agent, nextEvent) => buildGraphNodeReply(agent, nextEvent),
-      });
-
-      return {
-        runtime: 'langgraph',
-        durationMs: Date.now() - startTime,
-        plannerAgentID: plannerAgent.userAgentID,
-        workerAgentID: workerAgent.userAgentID,
-        task,
-        workerOutput: result.workerOutput,
-        finalOutput: result.finalOutput,
-        steps: result.steps,
-      };
-    },
-  },
-  {
-    method: 'POST',
     pattern: /^\/im\/events\/message$/,
     handler: async ({ body }) => {
       const event = parseMessageEvent(body);
@@ -598,11 +518,7 @@ const routes = [
       if (!agent) throw new HttpError(404, `Agent binding not found: ${event.recvID}`);
 
       const runID = `run_${randomUUID()}`;
-      void runMockAgentReply(runID, agent, event, {
-        handleGroupPlanConfirmation,
-        runVisibleGroupCollaboration,
-        sendGroupCollaborationError,
-      }).catch((err) => {
+      void runMockAgentReply(runID, agent, event).catch((err) => {
         log.error(`Agent 回复失败: agent=${agent.nickname || agent.templateID}`, err);
       });
 
@@ -763,8 +679,6 @@ server.listen(config.port, () => {
   log.info(`存储目录: ${config.storageDir}`);
   log.info(`工作区根目录: ${config.workspaceRoot}`);
   log.info(`agent/runs 等数据保存在: ${store.storageDir}`);
-  log.info(`LangGraph: ${langGraphRuntime.available ? '可用' : '不可用'} (${langGraphRuntime.source})`);
-  log.info(`LangGraph Supervisor: ${langGraphSupervisorRuntime.available ? '可用' : '不可用'} (${langGraphSupervisorRuntime.source})`);
 });
 
 if (createdAgents) {
@@ -900,7 +814,7 @@ function sanitizeAgentUpdates(body) {
   ]) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
   }
-  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor'].includes(updates.runtime)) {
+  if (updates.runtime && !['langchain-agent'].includes(updates.runtime)) {
     delete updates.runtime;
   }
   if (Array.isArray(body.enabledToolIDs)) {
