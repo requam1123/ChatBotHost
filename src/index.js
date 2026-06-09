@@ -207,13 +207,9 @@ const routes = [
       const now = Date.now();
 
       const userAgents = await store.readCollection('agents');
-      const existing = userAgents.find(
-        (agent) => agent.ownerUserID === ownerUserID && agent.templateID === template.templateID,
-      );
-      if (existing) return { agent: existing, created: false };
 
       const userAgentID = `ua_${randomUUID()}`;
-      const imAgentUserID = `agent_${template.templateID}_${ownerUserID}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const imAgentUserID = `agent_${template.templateID}_${ownerUserID}_${randomUUID().slice(0,6)}`.replace(/[^a-zA-Z0-9_-]/g, '_');
       const agent = {
         userAgentID,
         ownerUserID,
@@ -392,7 +388,7 @@ const routes = [
       const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
       const now = Date.now();
       const userAgentID = `ua_${now}_${randomUUID().slice(0, 8)}`;
-      const imAgentUserID = `agent_custom_${ownerUserID}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const imAgentUserID = `agent_custom_${ownerUserID}_${randomUUID().slice(0,6)}`.replace(/[^a-zA-Z0-9_-]/g, '_');
 
       const agent = {
         userAgentID,
@@ -594,13 +590,9 @@ const routes = [
       const now = Date.now();
 
       const userAgents = await store.readCollection('agents');
-      const existing = userAgents.find(
-        (agent) => agent.ownerUserID === ownerUserID && agent.templateID === template.templateID,
-      );
-      if (existing) return { agent: existing, created: false };
 
       const userAgentID = `ua_${randomUUID()}`;
-      const imAgentUserID = `agent_${template.templateID}_${ownerUserID}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const imAgentUserID = `agent_${template.templateID}_${ownerUserID}_${randomUUID().slice(0,6)}`.replace(/[^a-zA-Z0-9_-]/g, '_');
       const agent = {
         userAgentID,
         ownerUserID,
