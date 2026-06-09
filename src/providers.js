@@ -87,10 +87,10 @@ export async function resolveProviderConfig(store, agent) {
   }
 
   return {
-    provider: credential.type,
+    provider: credential.provider,
     baseURL: credential.baseUrl,
     apiKey: credential.apiKey,
-    model: agent.model || '',
+    model: agent.model || credential.modelName || '',
   };
 }
 

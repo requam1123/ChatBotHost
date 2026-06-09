@@ -617,9 +617,11 @@ const routes = [
       const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
       const apiKey = requiredString(body.apiKey, 'apiKey');
       const baseUrl = requiredString(body.baseUrl, 'baseUrl');
-      const type = typeof body.type === 'string' ? body.type.trim() : 'openai';
-      if (!type) throw new HttpError(400, 'type is required');
-      return createCredential({ ownerUserID, apiKey, baseUrl, type });
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const modelName = typeof body.modelName === 'string' ? body.modelName.trim() : '';
+      const provider = typeof body.provider === 'string' ? body.provider.trim() : 'openai';
+      if (!provider) throw new HttpError(400, 'provider is required');
+      return createCredential({ ownerUserID, apiKey, baseUrl, name, modelName, provider });
     },
   },
   {
@@ -642,7 +644,7 @@ const routes = [
         throw new HttpError(403, 'Cannot modify this credential');
       }
       const updates = {};
-      for (const key of ['apiKey', 'baseUrl', 'type']) {
+      for (const key of ['apiKey', 'baseUrl', 'name', 'modelName', 'provider']) {
         if (typeof body[key] === 'string') updates[key] = body[key].trim();
       }
       credentials[index] = { ...credentials[index], ...updates, updateTime: Date.now() };
@@ -762,7 +764,7 @@ function requiredString(value, name) {
   return value.trim();
 }
 
-async function createCredential({ ownerUserID, apiKey, baseUrl, type }) {
+async function createCredential({ ownerUserID, apiKey, baseUrl, name, modelName, provider }) {
   const credentials = await store.readCollection('credentials');
   const credentialID = `cred_${randomUUID()}`;
   const now = Date.now();
@@ -771,7 +773,9 @@ async function createCredential({ ownerUserID, apiKey, baseUrl, type }) {
     ownerUserID,
     apiKey,
     baseUrl,
-    type,
+    name: name || '',
+    modelName: modelName || '',
+    provider,
     createTime: now,
     updateTime: now,
   };
@@ -839,7 +843,9 @@ async function seedData(store) {
         ownerUserID: 'anonymous',
         apiKey,
         baseUrl,
-        type: 'openai',
+        name: '',
+        modelName: '',
+        provider: 'openai',
       });
       anonymousCredentialID = result.credential.credentialID;
       log.info(`已从环境变量迁移 anonymous credential: ${anonymousCredentialID}`);
@@ -848,7 +854,9 @@ async function seedData(store) {
         ownerUserID: 'anonymous',
         apiKey: 'sk-please-replace-me',
         baseUrl,
-        type: 'openai',
+        name: '',
+        modelName: '',
+        provider: 'openai',
       });
       anonymousCredentialID = result.credential.credentialID;
       log.warn(`已创建占位 anonymous credential: ${anonymousCredentialID}，请通过 API 更新为真实 API Key`);
