@@ -227,7 +227,7 @@ function buildMockReply(agent, event) {
   return `${agent.nickname} 已收到：${text}\n\n这是 ChatBotHost 的 mock 流式回复。下一步会把这里替换成 LangChain Agent 运行结果。`;
 }
 
-async function getActiveMcpConnections(store, agent) {
+export async function getActiveMcpConnections(store, agent) {
   const connectionIDs = agent.enabledMcpConnectionIDs || [];
   if (connectionIDs.length === 0) return [];
   const connections = await store.readCollection('mcp-connections');

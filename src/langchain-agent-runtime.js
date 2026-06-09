@@ -3,7 +3,7 @@ import { createAgent, tool } from 'langchain';
 import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
 import { executeToolCall, findTools } from './tools.js';
-import { resolveProviderConfig } from './providers.js';
+import { getActiveMcpConnections, resolveProviderConfig } from './providers.js';
 import { createLogger } from './logger.js';
 import { mcpToolId } from './mcp-client.js';
 
