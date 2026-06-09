@@ -2,14 +2,19 @@ import { access, cp, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/p
 import { basename, dirname, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { HttpError } from './http.js';
+import { createLogger } from './logger.js';
+
+const log = createLogger('workspace');
 
 const excludedNames = new Set(['.git', 'node_modules', '.DS_Store']);
 
 export async function listWorkspaces({ store, ownerUserID }) {
   const workspaces = await store.readCollection('workspaces');
-  return workspaces
+  const filtered = workspaces
     .filter((workspace) => workspace.ownerUserID === ownerUserID)
     .sort((a, b) => (b.updateTime || b.createTime || 0) - (a.updateTime || a.createTime || 0));
+  log.info(`列出工作区: user=${ownerUserID}, count=${filtered.length}`);
+  return filtered;
 }
 
 export async function createWorkspace({ store, config, ownerUserID, name, targetPath }) {
@@ -26,12 +31,17 @@ export async function createWorkspace({ store, config, ownerUserID, name, target
     updateTime: now,
   };
 
+  log.info(`创建工作区: id=${workspace.workspaceID}, name=${workspace.name}, target=${workspace.targetPath}`);
+  log.info(`sandbox 路径: ${workspace.sandboxPath}`);
+
   await mkdir(workspace.sandboxPath, { recursive: true });
+  log.info(`从 target 目录 seed sandbox: ${workspace.targetPath} -> ${workspace.sandboxPath}`);
   await seedSandboxFromTarget(workspace);
 
   const workspaces = await store.readCollection('workspaces');
   workspaces.push(workspace);
   await store.writeCollection('workspaces', workspaces);
+  log.info(`工作区创建完成: ${workspace.workspaceID}, 总工作区数: ${workspaces.length}`);
   return workspace;
 }
 
@@ -39,8 +49,12 @@ export async function ensureDefaultWorkspace({ store, config, ownerUserID }) {
   const workspaces = await listWorkspaces({ store, ownerUserID });
   if (workspaces.length > 0) return workspaces[0];
 
+  log.info(`用户 ${ownerUserID} 无工作区，尝试创建默认工作区`);
   const defaultPath = resolve(config.repoRoot, 'my-web-workspace');
-  if (!(await exists(defaultPath))) return null;
+  if (!(await exists(defaultPath))) {
+    log.info(`默认工作区路径不存在: ${defaultPath}`);
+    return null;
+  }
   return createWorkspace({
     store,
     config,
@@ -64,8 +78,13 @@ export async function bindConversationWorkspace({ store, config, ownerUserID, co
     createTime: existingIndex >= 0 ? bindings[existingIndex].createTime : now,
     updateTime: now,
   };
-  if (existingIndex >= 0) bindings[existingIndex] = binding;
-  else bindings.push(binding);
+  if (existingIndex >= 0) {
+    bindings[existingIndex] = binding;
+    log.info(`更新会话-工作区绑定: conversation=${conversationID} -> workspace=${workspaceID}`);
+  } else {
+    bindings.push(binding);
+    log.info(`新建会话-工作区绑定: conversation=${conversationID} -> workspace=${workspaceID}`);
+  }
   await store.writeCollection('conversation-workspaces', bindings);
   return { binding, workspace };
 }
@@ -75,15 +94,20 @@ export async function getConversationWorkspace({ store, config, ownerUserID, con
   const binding = bindings.find((item) => item.ownerUserID === ownerUserID && item.conversationID === conversationID);
   if (binding) {
     const workspace = await requireWorkspace({ store, config, ownerUserID, workspaceID: binding.workspaceID });
+    log.info(`查询会话工作区: conversation=${conversationID} -> workspace=${workspace.workspaceID}`);
     return { binding, workspace };
   }
+  log.info(`会话无工作区绑定: conversation=${conversationID}`);
   return { binding: null, workspace: null };
 }
 
 export async function requireWorkspace({ store, config, ownerUserID, workspaceID }) {
   const workspaces = await store.readCollection('workspaces');
   const workspace = workspaces.find((item) => item.workspaceID === workspaceID && item.ownerUserID === ownerUserID);
-  if (!workspace) throw new HttpError(404, 'Workspace not found');
+  if (!workspace) {
+    log.warn(`工作区不存在: workspaceID=${workspaceID}, ownerUserID=${ownerUserID}`);
+    throw new HttpError(404, 'Workspace not found');
+  }
   workspace.sandboxPath ||= resolve(config.workspaceRoot, workspace.workspaceID);
   await mkdir(workspace.sandboxPath, { recursive: true });
   return workspace;
@@ -98,6 +122,7 @@ export async function resolveEventWorkspace({ store, config, event, ownerUserID 
     autoCreate: false,
   });
   if (!workspace) {
+    log.info(`事件无工作区: conversation=${event.conversationID}`);
     return {
       workspaceID: event.conversationID || event.serverMsgID || '',
       workspacePath: '',
@@ -105,6 +130,7 @@ export async function resolveEventWorkspace({ store, config, event, ownerUserID 
       workspaceName: '',
     };
   }
+  log.info(`解析事件工作区: conversation=${event.conversationID} -> workspace=${workspace.workspaceID}, sandbox=${workspace.sandboxPath}`);
   return {
     workspaceID: workspace.workspaceID,
     workspacePath: workspace.sandboxPath,
@@ -128,6 +154,7 @@ export async function listWorkspaceFiles({ workspace, source = 'sandbox', dir = 
       if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
+  log.info(`列出工作区文件: source=${source}, dir="${dir}", entries=${files.length}`);
   return { files, source, dir };
 }
 
@@ -137,6 +164,7 @@ export async function readWorkspaceFile({ workspace, source = 'sandbox', filePat
   const info = await stat(absolutePath);
   if (!info.isFile()) throw new HttpError(400, 'Path is not a file');
   const content = await readFile(absolutePath, 'utf8');
+  log.info(`读取工作区文件: source=${source}, path=${filePath}, bytes=${Buffer.byteLength(content)}`);
   return {
     path: toPosix(relative(root, absolutePath)),
     content,
@@ -150,8 +178,10 @@ export async function writeWorkspaceFile({ workspace, source = 'sandbox', filePa
   const root = getWorkspaceSourceRoot(workspace, source);
   const absolutePath = resolveInside(root, filePath, 'Path escapes workspace');
   await mkdir(dirname(absolutePath), { recursive: true });
+  const bytes = Buffer.byteLength(typeof content === 'string' ? content : '');
   await writeFile(absolutePath, typeof content === 'string' ? content : '', 'utf8');
-  return { path: toPosix(relative(root, absolutePath)), source, bytes: Buffer.byteLength(content || '') };
+  log.info(`写入工作区文件: path=${filePath}, bytes=${bytes}`);
+  return { path: toPosix(relative(root, absolutePath)), source, bytes };
 }
 
 function getWorkspaceSourceRoot(workspace, source) {

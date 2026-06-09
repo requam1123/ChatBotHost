@@ -3,6 +3,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { loadConfig } from './config.js';
+import { createLogger } from './logger.js';
 import { createJsonServer, HttpError } from './http.js';
 import { JsonStore } from './storage.js';
 import { ImClient } from './im-client.js';
@@ -36,6 +37,7 @@ import {
 const config = loadConfig();
 const store = new JsonStore(config.storageDir);
 const imClient = new ImClient(config.imServerBaseURL);
+const log = createLogger('server');
 const langGraphRuntime = await createLangGraphRuntime();
 const langGraphSupervisorRuntime = await createLangGraphSupervisorRuntime();
 
@@ -44,9 +46,13 @@ const wsConnections = new Map();
 async function connectAgentWs(agent) {
   if (!agent.imAgentUserID) return;
   const existing = wsConnections.get(agent.imAgentUserID);
-  if (existing) existing.disconnect();
+  if (existing) {
+    log.info(`断开旧的 WS 连接: ${agent.imAgentUserID}`);
+    existing.disconnect();
+  }
 
   const token = await imClient.getToken(agent.imAgentUserID, 12);
+  log.info(`建立 WS 连接: ${agent.imAgentUserID}`);
   const client = new ImWsClient({
     wsURL: config.imServerWSURL,
     agentUserID: agent.imAgentUserID,
@@ -54,7 +60,7 @@ async function connectAgentWs(agent) {
     platformID: 12,
     onMessage: (payload) => {
       void handleIncomingMessage(payload).catch((err) => {
-        console.error('WS message handler failed', err);
+        log.error('WS 消息处理失败', err);
       });
     },
   });
@@ -64,10 +70,11 @@ async function connectAgentWs(agent) {
 
 async function startAgentWsConnections() {
   const userAgents = await store.readCollection('user-agents');
+  log.info(`启动 ${userAgents.length} 个 Agent WebSocket 连接`);
   for (const agent of userAgents) {
     await connectAgentWs(agent);
   }
-  console.log(`[WS] Connected ${wsConnections.size} agent WebSocket(s)`);
+  log.info(`WebSocket 连接完成: ${wsConnections.size} 个`);
 }
 
 async function handleIncomingMessage(payload) {
@@ -89,11 +96,16 @@ async function handleIncomingMessage(payload) {
 
   const userAgents = await store.readCollection('user-agents');
   const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
-  if (!agent) return;
+  if (!agent) {
+    log.warn(`未找到 Agent 绑定: recvID=${event.recvID}`);
+    return;
+  }
+
+  log.info(`收到 IM 消息: from=${event.sendID}, to=${event.recvID}(${agent.nickname || agent.templateID}), conversation=${event.conversationID}, content="${truncateText(event.content, 80)}"`);
 
   const runID = `run_${randomUUID()}`;
   void runMockAgentReply(runID, agent, event).catch((err) => {
-    console.error('Mock agent reply failed', err);
+    log.error(`Agent 回复失败: agent=${agent.nickname || agent.templateID}, runID=${runID}`, err);
   });
 }
 
@@ -541,7 +553,7 @@ const routes = [
 
       const runID = `run_${randomUUID()}`;
       void runMockAgentReply(runID, agent, event).catch((err) => {
-        console.error('Mock agent reply failed', err);
+        log.error(`Agent 回复失败: agent=${agent.nickname || agent.templateID}`, err);
       });
 
       return { accepted: true, runID };
@@ -556,7 +568,13 @@ const routes = [
 
 const server = createJsonServer(routes);
 server.listen(config.port, () => {
-  console.log(`ChatBotHost listening on http://localhost:${config.port}`);
+  log.info(`ChatBotHost 启动成功, 端口: ${config.port}`);
+  log.info(`IM 服务器: ${config.imServerBaseURL}`);
+  log.info(`存储目录: ${config.storageDir}`);
+  log.info(`工作区根目录: ${config.workspaceRoot}`);
+  log.info(`agent/runs 等数据保存在: ${store.storageDir}`);
+  log.info(`LangGraph: ${langGraphRuntime.available ? '可用' : '不可用'} (${langGraphRuntime.source})`);
+  log.info(`LangGraph Supervisor: ${langGraphSupervisorRuntime.available ? '可用' : '不可用'} (${langGraphSupervisorRuntime.source})`);
 });
 
 function requireTemplate(templateID) {
@@ -651,14 +669,18 @@ function parseMessageEvent(body) {
 }
 
 async function runMockAgentReply(runID, agent, event) {
+  log.info(`开始 Agent 回复: runID=${runID}, agent=${agent.nickname || agent.templateID}, runtime=${agent.runtime}, conversation=${event.conversationID}`);
   const workspaceContext = await resolveEventWorkspace({ store, config, event, ownerUserID: agent.ownerUserID });
+
   if (event.groupID && agent.runtime === 'langgraph-planner-worker') {
+    log.info(`群组 Planner-Worker 流程: groupID=${event.groupID}`);
     try {
       if (await handleGroupPlanConfirmation(runID, agent, event, workspaceContext)) {
         return;
       }
       await runVisibleGroupCollaboration(runID, agent, event, workspaceContext);
     } catch (err) {
+      log.error(`群组协作失败: groupID=${event.groupID}`, err);
       await sendGroupCollaborationError(runID, agent, event, err, workspaceContext);
     }
     return;
@@ -675,6 +697,9 @@ async function runMockAgentReply(runID, agent, event) {
   });
   const runResult = attachWorkspaceResult(result, workspaceContext);
   const replyText = runResult.content;
+
+  log.info(`Agent 回复生成完毕: runtime=${runResult.runtime}, status=${runResult.status || 'unknown'}, contentLength=${replyText?.length || 0}, toolCalls=${runResult.toolCalls?.length || 0}, elapsed=${Date.now() - startTime}ms`);
+
   if (runResult.runtime === 'local-cli-agent') {
     const sent = await imClient.sendMessage({
       sendID: agent.imAgentUserID,
@@ -705,6 +730,7 @@ async function runMockAgentReply(runID, agent, event) {
       endTime,
     }));
     await store.writeCollection('agent-runs', runs);
+    log.info(`Agent run 已保存: runID=${runID}, serverMsgID=${serverMsgID}`);
     return;
   }
   const initial = '正在思考...';
@@ -888,7 +914,7 @@ async function runVisibleGroupCollaboration(runID, plannerAgent, event, workspac
       await runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event, workspaceContext);
       return;
     } catch (err) {
-      console.error('LangGraph supervisor visible collaboration failed, falling back to legacy flow', err);
+      log.error(`LangGraph supervisor 协作失败，回退到 legacy flow: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   await runVisibleGroupCollaborationLegacy(runID, plannerAgent, event, workspaceContext);
@@ -1567,7 +1593,7 @@ async function buildAgentReply(agent, event, runContext = {}) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'LangChain agent failed';
-    console.error('LangChain agent failed, falling back to provider loop', message);
+    log.error(`LangChain agent 失败，回退到 provider loop: ${message}`);
     try {
       const result = await generateAgentReply(config, agent, event, {
         toolExecutor: (toolID, args, context) => executeToolCall(toolID, args, {
@@ -1585,7 +1611,7 @@ async function buildAgentReply(agent, event, runContext = {}) {
       return { ...result, mode: 'provider', status: 'success', error: '' };
     } catch (fallbackErr) {
       const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : message;
-      console.error('Provider completion failed, falling back to mock reply', fallbackMessage);
+      log.error(`Provider 调用失败，回退到 mock reply: ${fallbackMessage}`);
       return {
         content: `${agent.nickname} 暂时无法连接模型，已收到你的消息：${event.content}`,
         mode: 'fallback',
@@ -1928,7 +1954,7 @@ async function findGroupAgents(plannerAgent, event, userAgents) {
       memberIDs.has(agent.imAgentUserID)
     );
   } catch (err) {
-    console.error('Failed to resolve group agents', err);
+    log.error(`解析群组 Agent 失败: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }

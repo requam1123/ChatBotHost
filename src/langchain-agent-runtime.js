@@ -4,6 +4,9 @@ import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
 import { executeToolCall, findTools } from './tools.js';
 import { resolveProviderConfig } from './providers.js';
+import { createLogger } from './logger.js';
+
+const log = createLogger('langchain');
 
 const toolSchemas = {
   get_current_time: z.object({}),
@@ -49,6 +52,7 @@ export async function generateLangChainAgentReply(config, agent, event, options 
     throw new Error('Missing provider API key or model.');
   }
 
+  log.info(`LangChain Agent 开始: agent=${agent.nickname || agent.templateID}, model=${providerConfig.model}`);
   const toolCalls = [];
   const enabledTools = buildLangChainTools(config, agent, event, options, toolCalls);
   const model = new ChatOpenAI({
@@ -87,9 +91,14 @@ export async function generateLangChainAgentReply(config, agent, event, options 
         },
       },
     );
+    log.info(`LangChain Agent 完成: toolCalls=${toolCalls.length}`);
   } catch (err) {
-    if (toolCalls.length === 0) throw err;
+    if (toolCalls.length === 0) {
+      log.error(`LangChain Agent 执行失败 (无 toolCalls)`, err);
+      throw err;
+    }
     const message = err instanceof Error ? err.message : 'LangChain agent stopped after tool execution';
+    log.warn(`LangChain Agent 异常但已执行 toolCalls: ${message}, toolCalls=${toolCalls.length}`);
     return {
       content: summarizeToolCalls(toolCalls, message),
       mode: 'langchain-agent',

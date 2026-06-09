@@ -1,4 +1,7 @@
 import WebSocket from 'ws';
+import { createLogger } from './logger.js';
+
+const log = createLogger('ws');
 
 export class ImWsClient {
   constructor({ wsURL, agentUserID, token, platformID = 12, onMessage, onPatch }) {
@@ -20,11 +23,11 @@ export class ImWsClient {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
 
     const url = `${this.wsURL}/?token=${encodeURIComponent(this.token)}&sendID=${encodeURIComponent(this.agentUserID)}&platformID=${this.platformID}`;
-    console.log(`[WS] ${this.agentUserID} connecting to ${this.wsURL}`);
+    log.info(`正在连接: ${this.agentUserID} -> ${this.wsURL}`);
 
     this.ws = new WebSocket(url);
     this.ws.on('open', () => {
-      console.log(`[WS] ${this.agentUserID} connected`);
+      log.info(`已连接: ${this.agentUserID}`);
       this.reconnectDelay = 1000;
     });
     this.ws.on('message', (raw) => {
@@ -32,16 +35,16 @@ export class ImWsClient {
         const msg = JSON.parse(raw.toString());
         this.handleMessage(msg);
       } catch (err) {
-        console.error(`[WS] ${this.agentUserID} failed to parse message`, err);
+        log.error(`消息解析失败: ${this.agentUserID}`, err);
       }
     });
     this.ws.on('close', (code) => {
-      console.log(`[WS] ${this.agentUserID} disconnected (code=${code})`);
+      log.info(`已断开: ${this.agentUserID} (code=${code})`);
       this.ws = null;
       this.scheduleReconnect();
     });
     this.ws.on('error', (err) => {
-      console.error(`[WS] ${this.agentUserID} error`, err.message);
+      log.error(`连接错误: ${this.agentUserID}, ${err.message}`);
     });
   }
 
@@ -49,7 +52,7 @@ export class ImWsClient {
     if (this.stopped) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     const delay = this.reconnectDelay;
-    console.log(`[WS] ${this.agentUserID} reconnecting in ${delay}ms`);
+    log.info(`将在 ${delay}ms 后重连: ${this.agentUserID}`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

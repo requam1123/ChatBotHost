@@ -1,9 +1,14 @@
 import { findTools, toOpenAITools } from './tools.js';
+import { createLogger } from './logger.js';
+
+const log = createLogger('provider');
 
 export async function generateAgentReply(config, agent, event, options = {}) {
   const providerConfig = resolveProviderConfig(config, agent);
   if (providerConfig.apiKey && providerConfig.model) {
+    log.info(`调用 LLM: provider=${providerConfig.provider}, model=${providerConfig.model}, endpoint=${providerConfig.baseURL}`);
     const result = await callOpenAICompatible(providerConfig, agent, event, options);
+    log.info(`LLM 回复成功: provider=${providerConfig.provider}, contentLength=${result.content?.length || 0}, toolCalls=${result.toolCalls?.length || 0}`);
     return {
       ...result,
       provider: providerConfig.provider,
@@ -11,6 +16,7 @@ export async function generateAgentReply(config, agent, event, options = {}) {
       model: providerConfig.model,
     };
   }
+  log.info(`LLM 未配置，使用 mock 回复: agent=${agent.nickname || agent.templateID}`);
   return {
     content: buildMockReply(agent, event),
     toolCalls: [],
@@ -99,6 +105,7 @@ async function callOpenAICompatible(providerConfig, agent, event, options = {}) 
   const toolCalls = [];
 
   for (let step = 0; step < 3; step += 1) {
+    log.info(`LLM 第 ${step + 1} 轮请求, toolCall 累计=${toolCalls.length}`);
     const payload = await requestChatCompletion(providerConfig, messages, enabledTools);
     const message = payload?.choices?.[0]?.message;
     if (!message) throw new Error('Provider response did not include a message');
@@ -108,8 +115,11 @@ async function callOpenAICompatible(providerConfig, agent, event, options = {}) 
       if (typeof content !== 'string' || !content.trim()) {
         throw new Error('Provider response did not include message content');
       }
+      log.info(`LLM 返回纯文本回复, 长度=${content.length}`);
       return { content: content.trim(), toolCalls };
     }
+
+    log.info(`LLM 返回 ${message.tool_calls.length} 个 tool_calls: [${message.tool_calls.map((tc) => tc?.function?.name).join(', ')}]`);
 
     messages.push({
       role: 'assistant',
@@ -136,6 +146,7 @@ async function callOpenAICompatible(providerConfig, agent, event, options = {}) 
     }
   }
 
+  log.warn(`LLM 超过最大 tool-call 轮次 (3)`);
   throw new Error('Provider exceeded maximum tool-call steps');
 }
 
@@ -149,7 +160,8 @@ async function requestChatCompletion(providerConfig, messages, enabledTools) {
     body.tool_choice = 'auto';
   }
 
-  const res = await fetch(`${providerConfig.baseURL.replace(/\/$/, '')}/chat/completions`, {
+  const url = `${providerConfig.baseURL.replace(/\/$/, '')}/chat/completions`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -160,9 +172,15 @@ async function requestChatCompletion(providerConfig, messages, enabledTools) {
 
   const payload = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(payload?.error?.message || `Provider request failed with ${res.status}`);
+    const errMsg = payload?.error?.message || `Provider request failed with ${res.status}`;
+    log.error(`LLM API 请求失败: ${url} -> ${res.status}, ${errMsg}`);
+    throw new Error(errMsg);
   }
 
+  const usage = payload?.usage;
+  if (usage) {
+    log.info(`LLM 响应: status=${res.status}, tokens(prompt=${usage.prompt_tokens}, completion=${usage.completion_tokens}, total=${usage.total_tokens})`);
+  }
   return payload;
 }
 

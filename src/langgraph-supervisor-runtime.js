@@ -1,6 +1,11 @@
+import { createLogger } from './logger.js';
+
+const log = createLogger('langsuper');
+
 export async function createLangGraphSupervisorRuntime() {
   try {
     const langgraph = await import('@langchain/langgraph');
+    log.info('LangGraph Supervisor 运行时加载成功');
     return {
       available: true,
       source: '@langchain/langgraph',
@@ -8,6 +13,7 @@ export async function createLangGraphSupervisorRuntime() {
       runVisibleSupervisorGraph: (options) => runVisibleSupervisorGraph(langgraph, options),
     };
   } catch (err) {
+    log.warn(`LangGraph Supervisor 运行时加载失败: ${err instanceof Error ? err.message : String(err)}`);
     return {
       available: false,
       source: '@langchain/langgraph',

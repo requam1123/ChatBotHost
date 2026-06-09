@@ -1,7 +1,10 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { dirname, join, resolve, relative } from 'node:path';
+import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createLogger } from './logger.js';
+
+const log = createLogger('tools');
 
 export const toolCatalog = [
   {
@@ -172,34 +175,53 @@ export function toOpenAITools(tools) {
 }
 
 export async function executeToolCall(toolID, args, context) {
+  log.info(`执行工具调用: toolID=${toolID}, agent=${context.agent?.templateID || 'unknown'}`);
+
   if (!context.enabledToolIDs?.includes(toolID)) {
+    log.warn(`工具被禁用: toolID=${toolID}`);
     return { ok: false, error: `Tool is not enabled for this agent: ${toolID}` };
   }
 
+  let result;
   switch (toolID) {
     case 'get_current_time':
-      return {
+      result = {
         ok: true,
         time: new Date().toISOString(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
+      break;
     case 'read_conversation_messages':
-      return readConversationMessages(args, context);
+      result = await readConversationMessages(args, context);
+      break;
     case 'send_im_message':
-      return sendImMessage(args, context);
+      result = await sendImMessage(args, context);
+      break;
     case 'delegate_to_agent':
-      return delegateToAgent(args, context);
+      result = await delegateToAgent(args, context);
+      break;
     case 'workspace_read':
-      return workspaceRead(args, context);
+      result = await workspaceRead(args, context);
+      break;
     case 'workspace_write':
-      return workspaceWrite(args, context);
+      result = await workspaceWrite(args, context);
+      break;
     case 'bash':
-      return runBash(args, context);
+      result = await runBash(args, context);
+      break;
     case 'local_agent_run':
-      return runLocalAgent(args, context);
+      result = await runLocalAgent(args, context);
+      break;
     default:
-      return { ok: false, error: `Tool is not implemented: ${toolID}` };
+      result = { ok: false, error: `Tool is not implemented: ${toolID}` };
   }
+
+  if (result.ok) {
+    log.info(`工具执行成功: toolID=${toolID}`);
+  } else {
+    log.warn(`工具执行失败: toolID=${toolID}, error=${result.error || 'unknown'}`);
+  }
+  return result;
 }
 
 async function readConversationMessages(args, context) {
@@ -333,6 +355,8 @@ async function runBash(args, context) {
   if (!cwdTarget.ok) return cwdTarget;
   const timeoutMs = clampInteger(args.timeoutMs, 10000, 1000, 30000);
 
+  log.info(`执行 bash: cwd=${cwdTarget.relativePath || '.'}, timeout=${timeoutMs}ms, cmd="${truncateCmd(command, 200)}"`);
+
   return new Promise((resolvePromise) => {
     const startTime = Date.now();
     const child = spawn(command, {
@@ -361,6 +385,7 @@ async function runBash(args, context) {
     });
     child.on('error', (err) => {
       clearTimeout(timer);
+      log.error(`bash 进程启动失败: cmd="${truncateCmd(command, 100)}", error=${err.message}`);
       resolvePromise({
         ok: false,
         command,
@@ -371,7 +396,8 @@ async function runBash(args, context) {
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      resolvePromise({
+      const duration = Date.now() - startTime;
+      const result = {
         ok: code === 0 && !timedOut,
         command,
         cwd: cwdTarget.relativePath || '.',
@@ -380,8 +406,14 @@ async function runBash(args, context) {
         timedOut,
         stdout,
         stderr,
-        durationMs: Date.now() - startTime,
-      });
+        durationMs: duration,
+      };
+      if (!result.ok) {
+        log.warn(`bash 执行失败: exitCode=${code}, timedOut=${timedOut}, signal=${signal}, durationMs=${duration}`);
+      } else {
+        log.info(`bash 执行成功: exitCode=${code}, durationMs=${duration}`);
+      }
+      resolvePromise(result);
     });
   });
 }
@@ -407,12 +439,18 @@ async function runLocalAgent(args, context) {
   const cwdTarget = resolveWorkspacePath(root, typeof args.cwd === 'string' ? args.cwd : '.');
   if (!cwdTarget.ok) return cwdTarget;
   const timeoutMs = clampInteger(args.timeoutMs, 120000, 10000, 600000);
+
+  log.info(`执行本地 Agent: provider=${provider}, task="${truncateCmd(task, 150)}", cwd=${cwdTarget.relativePath || '.'}, timeout=${timeoutMs}ms`);
+
   const before = await snapshotWorkspace(root);
   const commandSpec = buildLocalAgentCommand(provider, task, {
     cwd: cwdTarget.path,
     model: typeof args.model === 'string' ? args.model.trim() : '',
   });
-  if (!commandSpec.ok) return commandSpec;
+  if (!commandSpec.ok) {
+    log.warn(`本地 Agent 命令构建失败: ${commandSpec.error}`);
+    return commandSpec;
+  }
 
   const result = await runProcess(commandSpec.command, commandSpec.args, {
     cwd: cwdTarget.path,
@@ -421,7 +459,7 @@ async function runLocalAgent(args, context) {
   const after = await snapshotWorkspace(root);
   const files = diffWorkspaceSnapshots(before, after);
 
-  return {
+  const finalResult = {
     ok: result.exitCode === 0 && !result.timedOut,
     provider,
     command: [commandSpec.command, ...commandSpec.args].join(' '),
@@ -436,6 +474,13 @@ async function runLocalAgent(args, context) {
     durationMs: result.durationMs,
     files,
   };
+
+  if (finalResult.ok) {
+    log.info(`本地 Agent 执行成功: provider=${provider}, exitCode=${result.exitCode}, durationMs=${result.durationMs}, changedFiles=${files.length}`);
+  } else {
+    log.warn(`本地 Agent 执行失败: provider=${provider}, exitCode=${result.exitCode}, timedOut=${result.timedOut}, durationMs=${result.durationMs}`);
+  }
+  return finalResult;
 }
 
 function buildLocalAgentCommand(provider, task, options) {
@@ -668,4 +713,9 @@ function clampInteger(value, defaultValue, min, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return defaultValue;
   return Math.min(Math.max(parsed, min), max);
+}
+
+function truncateCmd(cmd, maxLen) {
+  if (!cmd || cmd.length <= maxLen) return cmd || '';
+  return `${cmd.slice(0, maxLen)}...`;
 }

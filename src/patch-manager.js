@@ -2,6 +2,9 @@ import { access, copyFile, mkdir, readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve } from 'node:path';
+import { createLogger } from './logger.js';
+
+const log = createLogger('patch');
 
 const protectedPathPatterns = [
   /^\.git(?:\/|$)/,
@@ -13,6 +16,7 @@ const protectedPathPatterns = [
 ];
 
 export async function createPatchPreview({ config, run, body = {} }) {
+  log.info(`创建 Patch 预览: runID=${run.runID || 'unknown'}`);
   const mappings = resolvePatchMappings({ config, run, body });
   const files = [];
   for (const mapping of mappings) {
@@ -31,9 +35,11 @@ export async function createPatchPreview({ config, run, body = {} }) {
     });
   }
   if (files.length === 0) {
+    log.warn('Patch 预览: 未发现文件变更');
     throw new Error('No file changes found for patch preview');
   }
 
+  log.info(`Patch 预览完成: ${files.length} 个文件`);
   return {
     proposalID: `patch_${Date.now()}`,
     status: 'pending',
@@ -47,6 +53,7 @@ export async function applyPatchProposal({ config, run, proposal }) {
   if (!proposal || proposal.status !== 'pending') {
     throw new Error('Patch proposal is not pending');
   }
+  log.info(`应用 Patch: proposalID=${proposal.proposalID}, files=${proposal.files?.length || 0}`);
   const appliedFiles = [];
   for (const file of proposal.files || []) {
     const mapping = resolveSingleMapping({
@@ -63,8 +70,10 @@ export async function applyPatchProposal({ config, run, proposal }) {
       bytes: info.size,
       contentHash: await hashFile(mapping.repoPath),
     });
+    log.info(`Patch 文件已应用: ${mapping.targetPath} (${info.size} bytes)`);
   }
 
+  log.info(`Patch 应用完成: ${appliedFiles.length} 个文件`);
   return {
     ...proposal,
     status: 'applied',
