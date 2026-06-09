@@ -1,5 +1,6 @@
 import { findTools, toOpenAITools } from './tools.js';
 import { createLogger } from './logger.js';
+import { mcpToolId } from './mcp-client.js';
 
 const log = createLogger('provider');
 
@@ -7,7 +8,8 @@ export async function generateAgentReply(store, agent, event, options = {}) {
   const providerConfig = await resolveProviderConfig(store, agent);
   if (providerConfig.apiKey && providerConfig.model) {
     log.info(`调用 LLM: type=${providerConfig.provider}, model=${providerConfig.model}, endpoint=${providerConfig.baseURL}`);
-    const result = await callOpenAICompatible(providerConfig, agent, event, options);
+    const mcpConnections = await getActiveMcpConnections(store, agent);
+    const result = await callOpenAICompatible(providerConfig, agent, event, options, mcpConnections);
     log.info(`LLM 回复成功: type=${providerConfig.provider}, contentLength=${result.content?.length || 0}, toolCalls=${result.toolCalls?.length || 0}`);
     return {
       ...result,
@@ -92,8 +94,10 @@ export async function resolveProviderConfig(store, agent) {
   };
 }
 
-async function callOpenAICompatible(providerConfig, agent, event, options = {}) {
-  const enabledTools = findTools(agent.enabledToolIDs || []);
+async function callOpenAICompatible(providerConfig, agent, event, options = {}, mcpConnections = []) {
+  const builtinTools = findTools(agent.enabledToolIDs || []);
+  const mcpTools = buildMcpToolDefs(mcpConnections);
+  const enabledTools = [...builtinTools, ...mcpTools];
   const messages = [
     {
       role: 'system',
@@ -132,7 +136,7 @@ async function callOpenAICompatible(providerConfig, agent, event, options = {}) 
     for (const toolCall of message.tool_calls) {
       const name = toolCall?.function?.name;
       const args = parseToolArguments(toolCall?.function?.arguments);
-      const result = await executeToolCall(name, args, agent, event, options);
+      const result = await executeToolCall(name, args, agent, event, { ...options, mcpConnections });
       toolCalls.push({
         toolCallID: toolCall.id,
         toolID: name,
@@ -193,7 +197,11 @@ async function executeToolCall(toolID, args, agent, event, options) {
   if (typeof toolID !== 'string' || !toolID.trim()) {
     return { ok: false, error: 'Tool call did not include a function name' };
   }
-  return options.toolExecutor(toolID, args, { agent, event });
+  return options.toolExecutor(toolID, args, {
+    agent,
+    event,
+    mcpConnections: options.mcpConnections || [],
+  });
 }
 
 function parseToolArguments(raw) {
@@ -217,4 +225,32 @@ You may call the provided tools when they are useful. Use get_current_time for c
 function buildMockReply(agent, event) {
   const text = event.content.trim() || '空消息';
   return `${agent.nickname} 已收到：${text}\n\n这是 ChatBotHost 的 mock 流式回复。下一步会把这里替换成 LangChain Agent 运行结果。`;
+}
+
+async function getActiveMcpConnections(store, agent) {
+  const connectionIDs = agent.enabledMcpConnectionIDs || [];
+  if (connectionIDs.length === 0) return [];
+  const connections = await store.readCollection('mcp-connections');
+  return connections.filter(
+    (conn) => connectionIDs.includes(conn.mcpConnectionID) && conn.status === 'active',
+  );
+}
+
+function buildMcpToolDefs(mcpConnections) {
+  const tools = [];
+  for (const conn of mcpConnections) {
+    for (const tool of conn.tools || []) {
+      tools.push({
+        toolID: mcpToolId(conn.mcpConnectionID, tool.toolID),
+        name: mcpToolId(conn.mcpConnectionID, tool.toolID),
+        description: tool.description,
+        category: 'mcp',
+        riskLevel: 'medium',
+        source: conn.name,
+        inputSchema: tool.inputSchema || { type: 'object', properties: {} },
+        enabled: true,
+      });
+    }
+  }
+  return tools;
 }

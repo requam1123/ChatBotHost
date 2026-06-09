@@ -12,6 +12,7 @@ import { getTemplate, listActiveTemplates } from './market.js';
 import { executeToolCall, findTools, listTools, toolCatalog } from './tools.js';
 import { generateAgentReply, testAgentProvider } from './providers.js';
 import { createLangGraphRuntime } from './langgraph-runtime.js';
+import { discoverMcpTools } from './mcp-client.js';
 import { generateLangChainAgentReply } from './langchain-agent-runtime.js';
 import { applyPatchProposal, createPatchPreview } from './patch-manager.js';
 import { createLangGraphSupervisorRuntime } from './langgraph-supervisor-runtime.js';
@@ -452,6 +453,7 @@ const routes = [
         model: body.model || template.defaultModel,
         systemPrompt: body.systemPrompt || template.defaultSystemPrompt,
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
+        enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
         runtime: body.runtime || template.defaultRuntime || 'openai-tools',
         workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
         workerAgentUserID: body.workerAgentUserID || '',
@@ -621,6 +623,71 @@ const routes = [
       return { credential: deleted };
     },
   },
+  {
+    method: 'GET',
+    pattern: /^\/mcp-connections$/,
+    handler: async ({ url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const connections = await store.readCollection('mcp-connections');
+      const userConnections = connections.filter((conn) => conn.ownerUserID === ownerUserID);
+      return { connections: userConnections, total: userConnections.length };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/mcp-connections$/,
+    handler: async ({ body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const name = requiredString(body.name, 'name');
+      const url = requiredString(body.url, 'url');
+      return createMcpConnection({ ownerUserID, name, url });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/mcp-connections\/(?<mcpConnectionID>[^/]+)$/,
+    handler: async ({ params }) => {
+      const connection = await requireMcpConnection(params.mcpConnectionID);
+      return { connection };
+    },
+  },
+  {
+    method: 'PATCH',
+    pattern: /^\/mcp-connections\/(?<mcpConnectionID>[^/]+)$/,
+    handler: async ({ params, body }) => {
+      const connections = await store.readCollection('mcp-connections');
+      const index = connections.findIndex((conn) => conn.mcpConnectionID === params.mcpConnectionID);
+      if (index === -1) throw new HttpError(404, 'MCP connection not found');
+
+      if (typeof body.name === 'string') connections[index].name = body.name.trim();
+      if (typeof body.url === 'string') {
+        connections[index].url = body.url.trim();
+      }
+
+      try {
+        connections[index].tools = await discoverMcpTools(connections[index].url);
+        connections[index].status = 'active';
+      } catch (err) {
+        connections[index].status = 'error';
+        log.warn(`MCP 工具重新发现失败: ${connections[index].url}, ${err.message}`);
+      }
+      connections[index].updateTime = Date.now();
+      await store.writeCollection('mcp-connections', connections);
+      return { connection: connections[index] };
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: /^\/mcp-connections\/(?<mcpConnectionID>[^/]+)$/,
+    handler: async ({ params }) => {
+      const connections = await store.readCollection('mcp-connections');
+      const index = connections.findIndex((conn) => conn.mcpConnectionID === params.mcpConnectionID);
+      if (index === -1) throw new HttpError(404, 'MCP connection not found');
+      const deleted = connections.splice(index, 1)[0];
+      await store.writeCollection('mcp-connections', connections);
+      return { connection: deleted };
+    },
+  },
 ];
 
 await seedData(store);
@@ -678,6 +745,42 @@ async function requireCredential(credentialID, url) {
   return credential;
 }
 
+async function createMcpConnection({ ownerUserID, name, url }) {
+  const connections = await store.readCollection('mcp-connections');
+  const mcpConnectionID = `mcp_${randomUUID()}`;
+  const now = Date.now();
+  const connection = {
+    mcpConnectionID,
+    ownerUserID,
+    name,
+    url,
+    transport: 'http',
+    tools: [],
+    status: 'active',
+    createTime: now,
+    updateTime: now,
+  };
+
+  try {
+    connection.tools = await discoverMcpTools(url);
+    log.info(`MCP 连接创建并发现工具: ${mcpConnectionID}, ${connection.tools.length} 个工具`);
+  } catch (err) {
+    connection.status = 'error';
+    log.warn(`MCP 工具发现失败: ${url}, ${err.message}`);
+  }
+
+  connections.push(connection);
+  await store.writeCollection('mcp-connections', connections);
+  return { connection };
+}
+
+async function requireMcpConnection(mcpConnectionID) {
+  const connections = await store.readCollection('mcp-connections');
+  const connection = connections.find((conn) => conn.mcpConnectionID === mcpConnectionID);
+  if (!connection) throw new HttpError(404, 'MCP connection not found');
+  return connection;
+}
+
 async function seedData(store) {
   const credentials = await store.readCollection('credentials');
   let anonymousCredentialID = credentials.find((cred) => cred.ownerUserID === 'anonymous')?.credentialID || '';
@@ -723,6 +826,7 @@ async function seedData(store) {
         model: template.defaultModel,
         systemPrompt: template.defaultSystemPrompt,
         enabledToolIDs: template.defaultToolIDs,
+        enabledMcpConnectionIDs: [],
         runtime: template.defaultRuntime,
         workerTemplateID: template.defaultWorkerTemplateID,
         workerAgentUserID: '',
@@ -2020,6 +2124,9 @@ function sanitizeAgentUpdates(body) {
   if (Array.isArray(body.enabledToolIDs)) {
     const validIDs = new Set(listTools().map((tool) => tool.toolID));
     updates.enabledToolIDs = body.enabledToolIDs.filter((id) => typeof id === 'string' && validIDs.has(id));
+  }
+  if (Array.isArray(body.enabledMcpConnectionIDs)) {
+    updates.enabledMcpConnectionIDs = body.enabledMcpConnectionIDs.filter((id) => typeof id === 'string');
   }
   return updates;
 }

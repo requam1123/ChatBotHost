@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from './logger.js';
+import { executeMcpTool, parseMcpToolId } from './mcp-client.js';
 
 const log = createLogger('tools');
 
@@ -162,34 +163,47 @@ export async function executeToolCall(toolID, args, context) {
   }
 
   let result;
-  switch (toolID) {
-    case 'get_current_time':
-      result = {
-        ok: true,
-        time: new Date().toISOString(),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      };
-      break;
-    case 'read_conversation_messages':
-      result = await readConversationMessages(args, context);
-      break;
-    case 'send_im_message':
-      result = await sendImMessage(args, context);
-      break;
-    case 'delegate_to_agent':
-      result = await delegateToAgent(args, context);
-      break;
-    case 'workspace_read':
-      result = await workspaceRead(args, context);
-      break;
-    case 'workspace_write':
-      result = await workspaceWrite(args, context);
-      break;
-    case 'bash':
-      result = await runBash(args, context);
-      break;
-    default:
-      result = { ok: false, error: `Tool is not implemented: ${toolID}` };
+
+  const mcpParsed = parseMcpToolId(toolID);
+  if (mcpParsed) {
+    const mcpConnection = (context.mcpConnections || []).find(
+      (conn) => conn.mcpConnectionID === mcpParsed.mcpConnectionID,
+    );
+    if (!mcpConnection) {
+      result = { ok: false, error: `MCP connection not found: ${mcpParsed.mcpConnectionID}` };
+    } else {
+      result = await executeMcpTool(mcpConnection.url, mcpParsed.toolID, args);
+    }
+  } else {
+    switch (toolID) {
+      case 'get_current_time':
+        result = {
+          ok: true,
+          time: new Date().toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        };
+        break;
+      case 'read_conversation_messages':
+        result = await readConversationMessages(args, context);
+        break;
+      case 'send_im_message':
+        result = await sendImMessage(args, context);
+        break;
+      case 'delegate_to_agent':
+        result = await delegateToAgent(args, context);
+        break;
+      case 'workspace_read':
+        result = await workspaceRead(args, context);
+        break;
+      case 'workspace_write':
+        result = await workspaceWrite(args, context);
+        break;
+      case 'bash':
+        result = await runBash(args, context);
+        break;
+      default:
+        result = { ok: false, error: `Tool is not implemented: ${toolID}` };
+    }
   }
 
   if (result.ok) {

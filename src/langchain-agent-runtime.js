@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { executeToolCall, findTools } from './tools.js';
 import { resolveProviderConfig } from './providers.js';
 import { createLogger } from './logger.js';
+import { mcpToolId } from './mcp-client.js';
 
 const log = createLogger('langchain');
 
@@ -47,7 +48,8 @@ export async function generateLangChainAgentReply(store, agent, event, options =
 
   log.info(`LangChain Agent 开始: agent=${agent.nickname || agent.templateID}, model=${providerConfig.model}`);
   const toolCalls = [];
-  const enabledTools = buildLangChainTools(store, agent, event, options, toolCalls);
+  const mcpConnections = await getActiveMcpConnections(store, agent);
+  const enabledTools = buildLangChainTools(store, agent, event, options, toolCalls, mcpConnections);
   const model = new ChatOpenAI({
     model: providerConfig.model,
     apiKey: providerConfig.apiKey,
@@ -118,9 +120,10 @@ export async function generateLangChainAgentReply(store, agent, event, options =
   };
 }
 
-function buildLangChainTools(store, agent, event, options, toolCalls) {
+function buildLangChainTools(store, agent, event, options, toolCalls, mcpConnections = []) {
   const enabledToolDefs = findTools(agent.enabledToolIDs || []);
-  return enabledToolDefs.map((toolDef) => tool(async (args) => {
+
+  const builtinTools = enabledToolDefs.map((toolDef) => tool(async (args) => {
     const startTime = Date.now();
     const result = await executeToolCall(toolDef.toolID, args, {
       agent,
@@ -132,6 +135,7 @@ function buildLangChainTools(store, agent, event, options, toolCalls) {
       runID: options.runID,
       workspaceID: options.workspaceID,
       workspacePath: options.workspacePath,
+      mcpConnections,
     });
     toolCalls.push({
       toolCallID: `tool_${randomUUID()}`,
@@ -148,6 +152,43 @@ function buildLangChainTools(store, agent, event, options, toolCalls) {
     description: toolDef.description,
     schema: toolSchemas[toolDef.toolID] || z.object({}),
   }));
+
+  const mcpTools = (mcpConnections || []).flatMap((conn) =>
+    (conn.tools || []).map((mcpTool) => {
+      const prefixedId = mcpToolId(conn.mcpConnectionID, mcpTool.toolID);
+      return tool(async (args) => {
+        const startTime = Date.now();
+        const result = await executeToolCall(prefixedId, args, {
+          agent,
+          event,
+          imClient: options.imClient,
+          enabledToolIDs: agent.enabledToolIDs || [],
+          delegateToAgent: options.delegateToAgent,
+          workspaceRoot: store.config?.workspaceRoot || '',
+          runID: options.runID,
+          workspaceID: options.workspaceID,
+          workspacePath: options.workspacePath,
+          mcpConnections,
+        });
+        toolCalls.push({
+          toolCallID: `tool_${randomUUID()}`,
+          toolID: prefixedId,
+          args: safeRecord(args),
+          result: safeRecord(result),
+          startTime,
+          createTime: Date.now(),
+          durationMs: Date.now() - startTime,
+        });
+        return JSON.stringify(result);
+      }, {
+        name: prefixedId,
+        description: `[MCP:${conn.name}] ${mcpTool.description}`,
+        schema: z.object({}).passthrough(),
+      });
+    }),
+  );
+
+  return [...builtinTools, ...mcpTools];
 }
 
 function buildSystemPrompt(agent, enabledTools) {
