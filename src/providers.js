@@ -3,12 +3,12 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('provider');
 
-export async function generateAgentReply(config, agent, event, options = {}) {
-  const providerConfig = resolveProviderConfig(config, agent);
+export async function generateAgentReply(store, agent, event, options = {}) {
+  const providerConfig = await resolveProviderConfig(store, agent);
   if (providerConfig.apiKey && providerConfig.model) {
-    log.info(`调用 LLM: provider=${providerConfig.provider}, model=${providerConfig.model}, endpoint=${providerConfig.baseURL}`);
+    log.info(`调用 LLM: type=${providerConfig.provider}, model=${providerConfig.model}, endpoint=${providerConfig.baseURL}`);
     const result = await callOpenAICompatible(providerConfig, agent, event, options);
-    log.info(`LLM 回复成功: provider=${providerConfig.provider}, contentLength=${result.content?.length || 0}, toolCalls=${result.toolCalls?.length || 0}`);
+    log.info(`LLM 回复成功: type=${providerConfig.provider}, contentLength=${result.content?.length || 0}, toolCalls=${result.toolCalls?.length || 0}`);
     return {
       ...result,
       provider: providerConfig.provider,
@@ -26,8 +26,8 @@ export async function generateAgentReply(config, agent, event, options = {}) {
   };
 }
 
-export async function testAgentProvider(config, agent, overrides = {}) {
-  const providerConfig = resolveProviderConfig(config, { ...agent, ...overrides });
+export async function testAgentProvider(store, agent, overrides = {}) {
+  const providerConfig = await resolveProviderConfig(store, { ...agent, ...overrides });
   if (!providerConfig.apiKey || !providerConfig.model) {
     return {
       ok: false,
@@ -64,29 +64,31 @@ export async function testAgentProvider(config, agent, overrides = {}) {
   }
 }
 
-export function resolveProviderConfig(config, agent) {
-  const provider = agent.provider || 'ark';
-  const endpoint = agent.endpoint || '';
+export async function resolveProviderConfig(store, agent) {
+  const credentials = await store.readCollection('credentials');
 
-  if (
-    provider === 'ark' ||
-    endpoint.includes('volces.com') ||
-    agent.model?.startsWith?.('ep-') ||
-    config.ark.apiKey?.startsWith?.('ark-')
-  ) {
+  let credential;
+  if (agent.credentialID) {
+    credential = credentials.find((cred) => cred.credentialID === agent.credentialID);
+  }
+  if (!credential) {
+    credential = credentials.find((cred) => cred.ownerUserID === 'anonymous');
+  }
+
+  if (!credential) {
     return {
-      provider: 'ark',
-      baseURL: endpoint.includes('volces.com') ? endpoint : config.ark.baseURL,
-      apiKey: config.ark.apiKey,
-      model: agent.model || config.ark.model,
+      provider: '',
+      baseURL: '',
+      apiKey: '',
+      model: agent.model || '',
     };
   }
 
   return {
-    provider,
-    baseURL: endpoint,
-    apiKey: config.ark.apiKey,
-    model: agent.model,
+    provider: credential.type,
+    baseURL: credential.baseUrl,
+    apiKey: credential.apiKey,
+    model: agent.model || '',
   };
 }
 

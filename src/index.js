@@ -69,7 +69,7 @@ async function connectAgentWs(agent) {
 }
 
 async function startAgentWsConnections() {
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   log.info(`启动 ${userAgents.length} 个 Agent WebSocket 连接`);
   for (const agent of userAgents) {
     await connectAgentWs(agent);
@@ -94,7 +94,7 @@ async function handleIncomingMessage(payload) {
     mentionedAgentIDs: [],
   };
 
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
   if (!agent) {
     log.warn(`未找到 Agent 绑定: recvID=${event.recvID}`);
@@ -263,7 +263,7 @@ const routes = [
       const ownerUserID = url.searchParams.get('ownerUserID');
       if (!ownerUserID) throw new HttpError(400, 'ownerUserID is required');
 
-      const userAgents = await store.readCollection('user-agents');
+      const userAgents = await store.readCollection('agents');
       const agents = userAgents.filter((agent) => agent.ownerUserID === ownerUserID);
       return { agents, total: agents.length };
     },
@@ -398,7 +398,7 @@ const routes = [
     method: 'PATCH',
     pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)$/,
     handler: async ({ params, body }) => {
-      const userAgents = await store.readCollection('user-agents');
+      const userAgents = await store.readCollection('agents');
       const index = userAgents.findIndex((item) => item.userAgentID === params.userAgentID);
       if (index === -1) throw new HttpError(404, 'Agent not found');
 
@@ -418,7 +418,7 @@ const routes = [
       });
 
       userAgents[index] = agent;
-      await store.writeCollection('user-agents', userAgents);
+      await store.writeCollection('agents', userAgents);
 
       void connectAgentWs(agent);
 
@@ -433,7 +433,7 @@ const routes = [
       const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
       const now = Date.now();
 
-      const userAgents = await store.readCollection('user-agents');
+      const userAgents = await store.readCollection('agents');
       const existing = userAgents.find(
         (agent) => agent.ownerUserID === ownerUserID && agent.templateID === template.templateID,
       );
@@ -448,14 +448,11 @@ const routes = [
         imAgentUserID,
         nickname: body.nickname || template.name,
         avatarURL: body.avatarURL || template.avatarURL,
-        provider: body.provider || template.provider,
-        endpoint: body.endpoint || template.defaultEndpoint || '',
+        credentialID: body.credentialID || '',
         model: body.model || template.defaultModel,
         systemPrompt: body.systemPrompt || template.defaultSystemPrompt,
-        secretRefID: body.secretRefID || '',
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
         runtime: body.runtime || template.defaultRuntime || 'openai-tools',
-        localAgentProvider: body.localAgentProvider || template.defaultLocalAgentProvider || '',
         workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
         workerAgentUserID: body.workerAgentUserID || '',
         status: 'active',
@@ -472,7 +469,7 @@ const routes = [
       await imClient.ensureFriendPair(ownerUserID, imAgentUserID);
 
       userAgents.push(agent);
-      await store.writeCollection('user-agents', userAgents);
+      await store.writeCollection('agents', userAgents);
 
       void connectAgentWs(agent);
 
@@ -484,18 +481,7 @@ const routes = [
     pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/test$/,
     handler: async ({ params, body }) => {
       const agent = await requireUserAgent(params.userAgentID);
-      const runtime = body.runtime || agent.runtime;
-      if (runtime === 'local-cli-agent') {
-        const provider = body.localAgentProvider || agent.localAgentProvider || inferLocalAgentProvider(agent);
-        return {
-          ok: ['codex', 'claude', 'opencode'].includes(provider),
-          provider: 'local-cli',
-          endpoint: '',
-          model: provider,
-          message: `Local CLI provider configured: ${provider}`,
-        };
-      }
-      return testAgentProvider(config, agent, body);
+      return testAgentProvider(store, agent, body);
     },
   },
   {
@@ -547,7 +533,7 @@ const routes = [
     pattern: /^\/im\/events\/message$/,
     handler: async ({ body }) => {
       const event = parseMessageEvent(body);
-      const userAgents = await store.readCollection('user-agents');
+      const userAgents = await store.readCollection('agents');
       const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
       if (!agent) throw new HttpError(404, `Agent binding not found: ${event.recvID}`);
 
@@ -564,7 +550,80 @@ const routes = [
     pattern: /^\/debug\/tool-catalog$/,
     handler: async () => ({ tools: toolCatalog }),
   },
+  {
+    method: 'GET',
+    pattern: /^\/credentials$/,
+    handler: async ({ url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const credentials = await store.readCollection('credentials');
+      const userCredentials = credentials.filter((cred) =>
+        cred.ownerUserID === ownerUserID || cred.ownerUserID === 'anonymous'
+      );
+      return { credentials: userCredentials, total: userCredentials.length };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/credentials$/,
+    handler: async ({ body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const apiKey = requiredString(body.apiKey, 'apiKey');
+      const baseUrl = requiredString(body.baseUrl, 'baseUrl');
+      const type = typeof body.type === 'string' ? body.type.trim() : 'openai';
+      if (!type) throw new HttpError(400, 'type is required');
+      return createCredential({ ownerUserID, apiKey, baseUrl, type });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/credentials\/(?<credentialID>[^/]+)$/,
+    handler: async ({ params, url }) => {
+      const credential = await requireCredential(params.credentialID, url);
+      return { credential };
+    },
+  },
+  {
+    method: 'PATCH',
+    pattern: /^\/credentials\/(?<credentialID>[^/]+)$/,
+    handler: async ({ params, url, body }) => {
+      const credentials = await store.readCollection('credentials');
+      const index = credentials.findIndex((cred) => cred.credentialID === params.credentialID);
+      if (index === -1) throw new HttpError(404, 'Credential not found');
+      const ownerUserID = url.searchParams.get('ownerUserID') || '';
+      if (credentials[index].ownerUserID !== 'anonymous' && credentials[index].ownerUserID !== ownerUserID) {
+        throw new HttpError(403, 'Cannot modify this credential');
+      }
+      const updates = {};
+      for (const key of ['apiKey', 'baseUrl', 'type']) {
+        if (typeof body[key] === 'string') updates[key] = body[key].trim();
+      }
+      credentials[index] = { ...credentials[index], ...updates, updateTime: Date.now() };
+      await store.writeCollection('credentials', credentials);
+      return { credential: credentials[index] };
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: /^\/credentials\/(?<credentialID>[^/]+)$/,
+    handler: async ({ params, url }) => {
+      const credentials = await store.readCollection('credentials');
+      const index = credentials.findIndex((cred) => cred.credentialID === params.credentialID);
+      if (index === -1) throw new HttpError(404, 'Credential not found');
+      const ownerUserID = url.searchParams.get('ownerUserID') || '';
+      if (credentials[index].ownerUserID === 'anonymous') {
+        throw new HttpError(403, 'Cannot delete anonymous credential');
+      }
+      if (credentials[index].ownerUserID !== ownerUserID) {
+        throw new HttpError(403, 'Cannot delete this credential');
+      }
+      const deleted = credentials.splice(index, 1)[0];
+      await store.writeCollection('credentials', credentials);
+      return { credential: deleted };
+    },
+  },
 ];
+
+await seedData(store);
 
 const server = createJsonServer(routes);
 server.listen(config.port, () => {
@@ -588,6 +647,106 @@ function requiredString(value, name) {
     throw new HttpError(400, `${name} is required`);
   }
   return value.trim();
+}
+
+async function createCredential({ ownerUserID, apiKey, baseUrl, type }) {
+  const credentials = await store.readCollection('credentials');
+  const credentialID = `cred_${randomUUID()}`;
+  const now = Date.now();
+  const credential = {
+    credentialID,
+    ownerUserID,
+    apiKey,
+    baseUrl,
+    type,
+    createTime: now,
+    updateTime: now,
+  };
+  credentials.push(credential);
+  await store.writeCollection('credentials', credentials);
+  return { credential };
+}
+
+async function requireCredential(credentialID, url) {
+  const credentials = await store.readCollection('credentials');
+  const credential = credentials.find((cred) => cred.credentialID === credentialID);
+  if (!credential) throw new HttpError(404, 'Credential not found');
+  const ownerUserID = url.searchParams.get('ownerUserID') || '';
+  if (credential.ownerUserID !== 'anonymous' && credential.ownerUserID !== ownerUserID && ownerUserID) {
+    throw new HttpError(403, 'Cannot access this credential');
+  }
+  return credential;
+}
+
+async function seedData(store) {
+  const credentials = await store.readCollection('credentials');
+  let anonymousCredentialID = credentials.find((cred) => cred.ownerUserID === 'anonymous')?.credentialID || '';
+
+  if (!anonymousCredentialID) {
+    const apiKey = process.env.ARK_API_KEY || '';
+    const baseUrl = process.env.ARK_BASE_URL || 'https://api.openai.com/v1';
+    if (apiKey) {
+      const result = await createCredential({
+        ownerUserID: 'anonymous',
+        apiKey,
+        baseUrl,
+        type: 'openai',
+      });
+      anonymousCredentialID = result.credential.credentialID;
+      log.info(`已从环境变量迁移 anonymous credential: ${anonymousCredentialID}`);
+    } else {
+      const result = await createCredential({
+        ownerUserID: 'anonymous',
+        apiKey: 'sk-please-replace-me',
+        baseUrl,
+        type: 'openai',
+      });
+      anonymousCredentialID = result.credential.credentialID;
+      log.warn(`已创建占位 anonymous credential: ${anonymousCredentialID}，请通过 API 更新为真实 API Key`);
+    }
+  }
+
+  const agents = await store.readCollection('agents');
+  const anonymousAgents = agents.filter((agent) => agent.ownerUserID === 'anonymous');
+  if (anonymousAgents.length === 0 && anonymousCredentialID) {
+    for (const template of listActiveTemplates()) {
+      const userAgentID = `ua_${randomUUID()}`;
+      const imAgentUserID = `agent_${template.templateID}_anonymous`;
+      const agent = {
+        userAgentID,
+        ownerUserID: 'anonymous',
+        templateID: template.templateID,
+        imAgentUserID,
+        nickname: template.name,
+        avatarURL: template.avatarURL,
+        credentialID: anonymousCredentialID,
+        model: template.defaultModel,
+        systemPrompt: template.defaultSystemPrompt,
+        enabledToolIDs: template.defaultToolIDs,
+        runtime: template.defaultRuntime,
+        workerTemplateID: template.defaultWorkerTemplateID,
+        workerAgentUserID: '',
+        status: 'active',
+        createTime: Date.now(),
+        updateTime: Date.now(),
+      };
+
+      await imClient.registerAgentUser({
+        userID: imAgentUserID,
+        nickname: agent.nickname,
+        faceURL: agent.avatarURL,
+        agentPrompt: agent.systemPrompt,
+      }).catch((err) => {
+        log.warn(`注册 anonymous Agent 失败: ${imAgentUserID}, ${err.message}`);
+      });
+
+      agents.push(agent);
+    }
+    await store.writeCollection('agents', agents);
+    log.info(`已为 anonymous 创建 ${agents.length} 个 Agent`);
+
+    void startAgentWsConnections();
+  }
 }
 
 async function listLocalDirectories({ config, requestedPath }) {
@@ -700,39 +859,6 @@ async function runMockAgentReply(runID, agent, event) {
 
   log.info(`Agent 回复生成完毕: runtime=${runResult.runtime}, status=${runResult.status || 'unknown'}, contentLength=${replyText?.length || 0}, toolCalls=${runResult.toolCalls?.length || 0}, elapsed=${Date.now() - startTime}ms`);
 
-  if (runResult.runtime === 'local-cli-agent') {
-    const sent = await imClient.sendMessage({
-      sendID: agent.imAgentUserID,
-      recvID: event.groupID ? undefined : event.sendID,
-      groupID: event.groupID || undefined,
-      content: replyText,
-      senderNickname: agent.nickname,
-      senderFaceURL: agent.avatarURL,
-    });
-    const serverMsgID = sent.serverMsgID;
-    if (!serverMsgID) throw new Error('IM send_msg did not return serverMsgID');
-    const runs = await store.readCollection('agent-runs');
-    const endTime = Date.now();
-    runs.push(buildRunRecord({
-      runID,
-      responseServerMsgID: serverMsgID,
-      output: {
-        sendID: agent.imAgentUserID,
-        recvID: event.sendID,
-        groupID: event.groupID,
-        content: replyText,
-        serverMsgID,
-      },
-      agent,
-      event,
-      result: runResult,
-      startTime,
-      endTime,
-    }));
-    await store.writeCollection('agent-runs', runs);
-    log.info(`Agent run 已保存: runID=${runID}, serverMsgID=${serverMsgID}`);
-    return;
-  }
   const initial = '正在思考...';
   const sent = await imClient.sendMessage({
     sendID: agent.imAgentUserID,
@@ -1365,12 +1491,6 @@ function validateWorkerResult(workerResult) {
   const hasWorkspaceWrite = toolCalls.some((call) =>
     call.toolID === 'workspace_write' && call.result?.ok && call.result?.path
   );
-  const hasLocalAgentFile = toolCalls.some((call) =>
-    call.toolID === 'local_agent_run' &&
-    call.result?.ok &&
-    Array.isArray(call.result.files) &&
-    call.result.files.length > 0
-  );
   const hasStdoutOrStderr = toolCalls.some((call) =>
     typeof call.result?.stdout === 'string' && call.result.stdout.trim() ||
     typeof call.result?.stderr === 'string' && call.result.stderr.trim()
@@ -1380,7 +1500,7 @@ function validateWorkerResult(workerResult) {
   if (!hasSuccessfulToolTrace) {
     return { ok: false, message: 'Worker did not produce any successful tool trace' };
   }
-  if (!hasWorkspaceWrite && !hasLocalAgentFile && !hasStdoutOrStderr) {
+  if (!hasWorkspaceWrite && !hasStdoutOrStderr) {
     return { ok: false, message: 'Worker produced no stdout/stderr and no file changes' };
   }
   return { ok: true, message: 'Worker produced verifiable tool output' };
@@ -1478,102 +1598,7 @@ async function buildAgentReplyForRuntime(agent, event, runContext = {}) {
   if (agent.runtime === 'langgraph-planner-worker') {
     return buildLangGraphAgentReply(agent, event, runContext);
   }
-  if (agent.runtime === 'local-cli-agent') {
-    return buildLocalCliAgentReply(agent, event, runContext);
-  }
   return buildAgentReply(agent, event, runContext);
-}
-
-async function buildLocalCliAgentReply(agent, event, runContext = {}) {
-  const provider = agent.localAgentProvider || inferLocalAgentProvider(agent);
-  const startTime = Date.now();
-  const result = await executeToolCall('local_agent_run', {
-    provider,
-    task: event.content || '',
-    cwd: '.',
-    timeoutMs: 120000,
-  }, {
-    agent,
-    event,
-    imClient,
-    enabledToolIDs: agent.enabledToolIDs || [],
-    workspaceRoot: config.workspaceRoot,
-    runID: runContext.runID,
-    workspaceID: runContext.workspaceID,
-    workspacePath: runContext.workspacePath,
-  });
-  const toolCall = {
-    toolCallID: `tool_${randomUUID()}`,
-    toolID: 'local_agent_run',
-    args: {
-      provider,
-      task: event.content || '',
-      cwd: '.',
-      timeoutMs: 120000,
-    },
-    result,
-    startTime,
-    createTime: Date.now(),
-    durationMs: Date.now() - startTime,
-  };
-
-  const hasArtifact = hasUsableLocalAgentArtifact(result);
-  const isSuccess = Boolean(result.ok && hasArtifact);
-  const workspaceRequired = result?.code === 'WORKSPACE_REQUIRED';
-  const artifactError = result.ok && !hasArtifact
-    ? 'Local CLI agent exited successfully but produced no stdout, stderr, tool trace, or file changes'
-    : '';
-  return {
-    content: workspaceRequired
-      ? '请先为当前会话选择工作区，然后我再读取、写入或运行代码。'
-      : summarizeLocalCliResult(provider, result),
-    mode: 'local-cli-agent',
-    runtime: 'local-cli-agent',
-    status: isSuccess ? 'success' : 'failed',
-    provider: 'local-cli',
-    endpoint: '',
-    model: provider,
-    toolCalls: [toolCall],
-    error: isSuccess ? '' : artifactError || result.error || result.stderr || 'Local CLI agent failed',
-  };
-}
-
-function hasUsableLocalAgentArtifact(result) {
-  if (!result || !result.ok) return false;
-  const files = Array.isArray(result.files) ? result.files : [];
-  const hasFiles = files.length > 0;
-  const hasStdout = typeof result.stdout === 'string' && result.stdout.trim().length > 0;
-  const hasStderr = typeof result.stderr === 'string' && result.stderr.trim().length > 0;
-  return hasFiles || hasStdout || hasStderr;
-}
-
-function inferLocalAgentProvider(agent) {
-  if (agent.templateID === 'claude-code') return 'claude';
-  if (agent.templateID === 'opencode-cli') return 'opencode';
-  return 'codex';
-}
-
-function summarizeLocalCliResult(provider, result) {
-  const files = Array.isArray(result.files) ? result.files : [];
-  const hasArtifact = hasUsableLocalAgentArtifact(result);
-  const fileLines = files.length
-    ? files.map((file) => `- ${file.status || 'file'} ${file.path || file.targetPath || file.sandboxPath || ''} (${file.bytes ?? '-'} bytes)`).join('\n')
-    : '- no files changed';
-  return [
-    hasArtifact ? `本地 ${provider} 执行完成。` : `本地 ${provider} 执行失败/无产物。`,
-    '',
-    `exitCode: ${result.exitCode ?? '-'}`,
-    `timedOut: ${Boolean(result.timedOut)}`,
-    '',
-    'files:',
-    fileLines,
-    '',
-    'stdout:',
-    truncateText(result.stdout || '', 1200),
-    '',
-    'stderr:',
-    truncateText(result.stderr || result.error || '', 1200),
-  ].join('\n');
 }
 
 function truncateText(value, maxLength) {
@@ -1584,7 +1609,7 @@ function truncateText(value, maxLength) {
 
 async function buildAgentReply(agent, event, runContext = {}) {
   try {
-    return await generateLangChainAgentReply(config, agent, event, {
+    return await generateLangChainAgentReply(store, agent, event, {
       runID: runContext.runID,
       workspaceID: runContext.workspaceID,
       workspacePath: runContext.workspacePath,
@@ -1595,7 +1620,7 @@ async function buildAgentReply(agent, event, runContext = {}) {
     const message = err instanceof Error ? err.message : 'LangChain agent failed';
     log.error(`LangChain agent 失败，回退到 provider loop: ${message}`);
     try {
-      const result = await generateAgentReply(config, agent, event, {
+      const result = await generateAgentReply(store, agent, event, {
         toolExecutor: (toolID, args, context) => executeToolCall(toolID, args, {
           ...context,
           imClient,
@@ -1668,7 +1693,7 @@ async function delegateToAgent(sourceAgent, event, runContext, delegation) {
     return { ok: false, error: 'Delegation depth limit reached' };
   }
 
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   const targetAgent = findDelegationTarget(userAgents, sourceAgent, delegation);
   if (!targetAgent) {
     return { ok: false, error: 'No eligible target agent found for delegation' };
@@ -1859,7 +1884,7 @@ function clampInteger(value, defaultValue, min, max) {
 }
 
 async function requireUserAgent(userAgentID) {
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   const agent = userAgents.find((item) => item.userAgentID === userAgentID);
   if (!agent) throw new HttpError(404, 'Agent not found');
   return agent;
@@ -1874,7 +1899,7 @@ async function requireAgentRun(userAgentID, runID) {
 }
 
 async function requireWorkerAgent(plannerAgent, body) {
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   const worker = findDelegationTarget(userAgents, plannerAgent, {
     agentUserID: typeof body.agentUserID === 'string' ? body.agentUserID.trim() : '',
     templateID: typeof body.templateID === 'string' ? body.templateID.trim() : 'coder',
@@ -1884,17 +1909,12 @@ async function requireWorkerAgent(plannerAgent, body) {
 }
 
 async function resolveGroupCollaborationAgents(plannerAgent, event) {
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   const groupAgents = await findGroupAgents(plannerAgent, event, userAgents);
   const mentionedWorker = groupAgents.find((agent) =>
     agent.imAgentUserID !== plannerAgent.imAgentUserID &&
     agent.templateID !== 'reviewer' &&
     event.atUserIDList?.includes(agent.imAgentUserID)
-  );
-  const localCliWorker = groupAgents.find((agent) =>
-    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
-    agent.templateID !== 'reviewer' &&
-    agent.runtime === 'local-cli-agent'
   );
   const coderWorker = groupAgents.find((agent) =>
     agent.imAgentUserID !== plannerAgent.imAgentUserID &&
@@ -1904,7 +1924,7 @@ async function resolveGroupCollaborationAgents(plannerAgent, event) {
     agent.imAgentUserID !== plannerAgent.imAgentUserID &&
     agent.templateID !== 'reviewer'
   );
-  const groupWorker = mentionedWorker || localCliWorker || coderWorker || anyWorker;
+  const groupWorker = mentionedWorker || coderWorker || anyWorker;
   if (event.groupID && !groupWorker) {
     throw new HttpError(400, '这个群里还没有可执行的 Agent。请先把 Claude Code、Codex CLI、OpenCode 或 Coder 拉进群，再 @Planner Agent 分配任务。');
   }
@@ -1919,7 +1939,6 @@ async function resolveGroupCollaborationAgents(plannerAgent, event) {
   const selectionReason = buildWorkerSelectionReason({
     workerAgent,
     mentionedWorker,
-    localCliWorker,
     coderWorker,
     executableCount,
     hasGroup: Boolean(event.groupID),
@@ -1930,13 +1949,10 @@ async function resolveGroupCollaborationAgents(plannerAgent, event) {
   return { workerAgent, reviewerAgent, selectionReason };
 }
 
-function buildWorkerSelectionReason({ workerAgent, mentionedWorker, localCliWorker, coderWorker, executableCount, hasGroup }) {
+function buildWorkerSelectionReason({ workerAgent, mentionedWorker, coderWorker, executableCount, hasGroup }) {
   const prefix = hasGroup ? `当前群里有 ${executableCount} 个可执行 Agent。` : '';
   if (mentionedWorker && workerAgent.userAgentID === mentionedWorker.userAgentID) {
     return `${prefix}用户消息中显式 @ 了 ${workerAgent.nickname}，所以由它执行。`;
-  }
-  if (localCliWorker && workerAgent.userAgentID === localCliWorker.userAgentID) {
-    return `${prefix}${workerAgent.nickname} 是群里的本地 CLI Agent，适合执行代码任务。`;
   }
   if (coderWorker && workerAgent.userAgentID === coderWorker.userAgentID) {
     return `${prefix}${workerAgent.nickname} 是群里的 Coder Agent，匹配代码实现任务。`;
@@ -1960,7 +1976,7 @@ async function findGroupAgents(plannerAgent, event, userAgents) {
 }
 
 async function findOptionalAgent(sourceAgent, templateID) {
-  const userAgents = await store.readCollection('user-agents');
+  const userAgents = await store.readCollection('agents');
   return findDelegationTarget(userAgents, sourceAgent, { templateID }) || null;
 }
 
@@ -1977,7 +1993,7 @@ async function buildGraphNodeReply(agent, event, options = {}) {
     });
     return { ...result, mode: result.mode || 'langchain-agent', status: result.status || 'success', error: result.error || '' };
   }
-  const result = await generateAgentReply(config, {
+  const result = await generateAgentReply(store, {
     ...agent,
     enabledToolIDs: [],
   }, event, {});
@@ -1989,22 +2005,17 @@ function sanitizeAgentUpdates(body) {
   for (const key of [
     'nickname',
     'avatarURL',
-    'provider',
-    'endpoint',
+    'credentialID',
     'model',
     'systemPrompt',
     'runtime',
-    'localAgentProvider',
     'workerTemplateID',
     'workerAgentUserID',
   ]) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
   }
-  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor', 'local-cli-agent'].includes(updates.runtime)) {
+  if (updates.runtime && !['openai-tools', 'langgraph-planner-worker', 'langchain-agent', 'langgraph-supervisor'].includes(updates.runtime)) {
     delete updates.runtime;
-  }
-  if (updates.localAgentProvider && !['codex', 'claude', 'opencode'].includes(updates.localAgentProvider)) {
-    delete updates.localAgentProvider;
   }
   if (Array.isArray(body.enabledToolIDs)) {
     const validIDs = new Set(listTools().map((tool) => tool.toolID));

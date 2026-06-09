@@ -114,13 +114,6 @@ function inferFilesFromRun(run) {
         targetPath: call.result.path,
       });
     }
-    if (call.toolID === 'local_agent_run' && call.result?.ok && Array.isArray(call.result.files)) {
-      for (const file of call.result.files) {
-        const sandboxPath = typeof file.sandboxPath === 'string' ? file.sandboxPath : file.path;
-        const targetPath = typeof file.targetPath === 'string' ? file.targetPath : sandboxPath;
-        if (sandboxPath) files.push({ sandboxPath, targetPath });
-      }
-    }
   }
   return files;
 }

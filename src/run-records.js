@@ -63,28 +63,7 @@ export function buildArtifactsFromToolCalls(toolCalls = []) {
       status: 'sandbox',
       createTime: call.createTime || Date.now(),
     }));
-  const localAgentArtifacts = toolCalls
-    .filter((call) => call.toolID === 'local_agent_run' && call.result?.ok && Array.isArray(call.result.files))
-    .flatMap((call) => call.result.files.map((file) => {
-      const path = file.targetPath || file.sandboxPath || file.path;
-      return {
-        artifactID: `artifact_${stableHash(`${call.toolCallID}:${path}`)}`,
-        type: 'file',
-        source: 'local_agent',
-        path,
-        sandboxPath: file.sandboxPath || file.path || path,
-        targetPath: file.targetPath || path,
-        size: file.bytes || 0,
-        contentHash: '',
-        createToolCallID: call.toolCallID,
-        agentID: call.agentID || '',
-        agentUserID: call.agentUserID || '',
-        agentNickname: call.agentNickname || '',
-        status: file.status || 'sandbox',
-        createTime: call.createTime || Date.now(),
-      };
-    }));
-  return [...writeArtifacts, ...localAgentArtifacts];
+  return writeArtifacts;
 }
 
 export function normalizeArtifacts(artifacts = []) {

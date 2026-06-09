@@ -37,24 +37,17 @@ const toolSchemas = {
     cwd: z.string().optional(),
     timeoutMs: z.number().min(1000).max(30000).optional(),
   }),
-  local_agent_run: z.object({
-    provider: z.enum(['codex', 'claude', 'opencode']),
-    task: z.string(),
-    model: z.string().optional(),
-    cwd: z.string().optional(),
-    timeoutMs: z.number().min(10000).max(600000).optional(),
-  }),
 };
 
-export async function generateLangChainAgentReply(config, agent, event, options = {}) {
-  const providerConfig = resolveProviderConfig(config, agent);
+export async function generateLangChainAgentReply(store, agent, event, options = {}) {
+  const providerConfig = await resolveProviderConfig(store, agent);
   if (!providerConfig.apiKey || !providerConfig.model) {
     throw new Error('Missing provider API key or model.');
   }
 
   log.info(`LangChain Agent 开始: agent=${agent.nickname || agent.templateID}, model=${providerConfig.model}`);
   const toolCalls = [];
-  const enabledTools = buildLangChainTools(config, agent, event, options, toolCalls);
+  const enabledTools = buildLangChainTools(store, agent, event, options, toolCalls);
   const model = new ChatOpenAI({
     model: providerConfig.model,
     apiKey: providerConfig.apiKey,
@@ -125,7 +118,7 @@ export async function generateLangChainAgentReply(config, agent, event, options 
   };
 }
 
-function buildLangChainTools(config, agent, event, options, toolCalls) {
+function buildLangChainTools(store, agent, event, options, toolCalls) {
   const enabledToolDefs = findTools(agent.enabledToolIDs || []);
   return enabledToolDefs.map((toolDef) => tool(async (args) => {
     const startTime = Date.now();
@@ -135,7 +128,7 @@ function buildLangChainTools(config, agent, event, options, toolCalls) {
       imClient: options.imClient,
       enabledToolIDs: agent.enabledToolIDs || [],
       delegateToAgent: options.delegateToAgent,
-      workspaceRoot: config.workspaceRoot,
+      workspaceRoot: store.config?.workspaceRoot || '',
       runID: options.runID,
       workspaceID: options.workspaceID,
       workspacePath: options.workspacePath,
@@ -166,8 +159,7 @@ You are running as a LangChain agent with real tools. Use tools when they are us
 1. Use workspace_write to create or edit files in your sandbox.
 2. Use workspace_read when you need to inspect files.
 3. Use bash to run a small verification command.
-4. When asked to use a local coding CLI agent, call local_agent_run with provider codex, claude, or opencode. The local agent must work only inside the sandbox.
-5. Return a concise final answer with files touched, commands run, and results.
+4. Return a concise final answer with files touched, commands run, and results.
 
 Do not claim you executed a command unless you called the bash tool. Do not claim you wrote a file unless you called workspace_write.`;
 }
@@ -204,8 +196,6 @@ function summarizeToolCalls(toolCalls, warning) {
       lines.push(`- workspace_read: ${result.path || call.args?.path || ''} (${result.bytes ?? '-'} bytes, truncated=${Boolean(result.truncated)})`);
     } else if (call.toolID === 'bash') {
       lines.push(`- bash: ${result.command || call.args?.command || ''} -> exit ${result.exitCode ?? '-'}${result.stdout ? `, stdout: ${String(result.stdout).trim()}` : ''}`);
-    } else if (call.toolID === 'local_agent_run') {
-      lines.push(`- local_agent_run(${result.provider || call.args?.provider || ''}): ${result.commandName || ''} -> exit ${result.exitCode ?? '-'}, files=${Array.isArray(result.files) ? result.files.length : 0}`);
     } else {
       lines.push(`- ${call.toolID}: ok=${result.ok}`);
     }
