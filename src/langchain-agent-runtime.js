@@ -18,7 +18,9 @@ const toolSchemas = {
   send_im_message: z.object({
     conversationID: z.string(),
     content: z.string(),
+    atUserIDList: z.array(z.string()).optional(),
   }),
+  get_group_members: z.object({}),
   delegate_to_agent: z.object({
     agentUserID: z.string().optional(),
     templateID: z.string().optional(),

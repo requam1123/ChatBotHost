@@ -48,10 +48,21 @@ export const toolCatalog = [
       properties: {
         conversationID: { type: 'string' },
         content: { type: 'string' },
+        atUserIDList: { type: 'array', items: { type: 'string' } },
       },
       required: ['conversationID', 'content'],
       additionalProperties: false,
     },
+    enabled: true,
+  },
+  {
+    toolID: 'get_group_members',
+    name: 'Get Group Members',
+    description: 'Get the list of members in the current group chat, including userID, nickname and role. Only works in group conversations.',
+    category: 'safe_read',
+    riskLevel: 'low',
+    source: 'builtin',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     enabled: true,
   },
   {
@@ -189,6 +200,9 @@ export async function executeToolCall(toolID, args, context) {
       case 'send_im_message':
         result = await sendImMessage(args, context);
         break;
+      case 'get_group_members':
+        result = await getGroupMembers(args, context);
+        break;
       case 'delegate_to_agent':
         result = await delegateToAgent(args, context);
         break;
@@ -245,14 +259,37 @@ function isCurrentConversationAlias(value) {
   return !value || ['current', 'current_conversation', 'this_conversation'].includes(value);
 }
 
+async function getGroupMembers(_args, context) {
+  if (!context.event.groupID) {
+    return { ok: false, error: 'This is not a group conversation' };
+  }
+
+  try {
+    const members = await context.imClient.getGroupMembers(
+      context.event.groupID,
+      context.agent.ownerUserID,
+    );
+    const list = members.map((m) => ({
+      userID: m.userID,
+      nickname: m.nickname || m.userID,
+      roleLevel: m.roleLevel,
+    }));
+    return { ok: true, groupID: context.event.groupID, count: list.length, members: list };
+  } catch (err) {
+    return { ok: false, error: `Failed to fetch group members: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
 async function sendImMessage(args, context) {
   const content = typeof args.content === 'string' ? args.content.trim() : '';
   if (!content) return { ok: false, error: 'content is required' };
 
   const sent = await context.imClient.sendMessage({
     sendID: context.agent.imAgentUserID,
-    recvID: context.event.sendID,
+    recvID: context.event.groupID ? undefined : context.event.sendID,
+    groupID: context.event.groupID || undefined,
     content,
+    atUserIDList: Array.isArray(args.atUserIDList) ? args.atUserIDList : [],
     senderNickname: context.agent.nickname,
     senderFaceURL: context.agent.avatarURL,
   });
