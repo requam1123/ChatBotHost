@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { dirname, resolve, relative } from 'node:path';
+import { dirname, join, resolve, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const toolCatalog = [
   {
@@ -619,7 +620,7 @@ async function ensureWorkspace(context) {
     await mkdir(workspace, { recursive: true });
     return workspace;
   }
-  const root = resolve(context.workspaceRoot || new URL('../workspaces/', import.meta.url).pathname);
+  const root = resolve(context.workspaceRoot || fileURLToPath(new URL('../workspaces/', import.meta.url)));
   const runID = sanitizeSegment(context.workspaceID || context.runID || context.event?.serverMsgID || 'default');
   const workspace = resolve(root, runID);
   await mkdir(workspace, { recursive: true });
