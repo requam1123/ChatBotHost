@@ -1,4 +1,5 @@
 import { access, copyFile, mkdir, readFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { dirname, relative, resolve } from 'node:path';
 
@@ -18,6 +19,7 @@ export async function createPatchPreview({ config, run, body = {} }) {
     const beforeExists = await exists(mapping.repoPath);
     const beforeContent = beforeExists ? await readFile(mapping.repoPath, 'utf8') : '';
     const afterContent = await readFile(mapping.workspacePath, 'utf8');
+    if (beforeExists && beforeContent === afterContent) continue;
     const diff = await createUnifiedDiff(mapping.repoPath, mapping.workspacePath, mapping.targetPath, beforeExists);
     files.push({
       sandboxPath: mapping.sandboxPath,
@@ -28,11 +30,14 @@ export async function createPatchPreview({ config, run, body = {} }) {
       diff,
     });
   }
+  if (files.length === 0) {
+    throw new Error('No file changes found for patch preview');
+  }
 
   return {
     proposalID: `patch_${Date.now()}`,
     status: 'pending',
-    workspaceID: run.runID,
+    workspaceID: run.workspaceID || run.runID,
     createTime: Date.now(),
     files,
   };
@@ -56,6 +61,7 @@ export async function applyPatchProposal({ config, run, proposal }) {
     appliedFiles.push({
       targetPath: mapping.targetPath,
       bytes: info.size,
+      contentHash: await hashFile(mapping.repoPath),
     });
   }
 
@@ -111,8 +117,8 @@ function inferFilesFromRun(run) {
 }
 
 function resolveSingleMapping({ config, run, sandboxPath, targetPath }) {
-  const workspaceRoot = resolve(config.workspaceRoot, run.runID);
-  const repoRoot = resolve(config.repoRoot);
+  const workspaceRoot = resolve(run.workspacePath || config.workspaceRoot, run.workspacePath ? '.' : (run.workspaceID || run.runID));
+  const repoRoot = resolve(run.workspaceTargetPath || config.repoRoot);
   const workspacePath = resolveInside(workspaceRoot, sandboxPath, 'Sandbox path escapes workspace');
   const repoPath = resolveInside(repoRoot, targetPath, 'Target path escapes repo');
   const normalizedTarget = toPosix(relative(repoRoot, repoPath));
@@ -149,6 +155,11 @@ async function exists(path) {
   } catch {
     return false;
   }
+}
+
+async function hashFile(path) {
+  const content = await readFile(path);
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
 async function createUnifiedDiff(repoPath, workspacePath, targetPath, beforeExists) {

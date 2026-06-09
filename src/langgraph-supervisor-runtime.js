@@ -26,6 +26,9 @@ async function runVisibleSupervisorGraph(langgraph, options) {
     reviewerAgent: Annotation(),
     event: Annotation(),
     cleanTask: Annotation(),
+    workspaceContext: Annotation(),
+    selectionReason: Annotation(),
+    workerValidation: Annotation(),
     plannerAck: Annotation(),
     plannerDelegate: Annotation(),
     coderAck: Annotation(),
@@ -50,7 +53,7 @@ async function runVisibleSupervisorGraph(langgraph, options) {
     .addNode('planner_delegate', async (state) => options.nodes.plannerDelegate(state))
     .addNode('worker', async (state) => options.nodes.worker(state))
     .addNode('reviewer', async (state) => {
-      if (!state.reviewerAgent) return { graphSteps: [] };
+      if (!state.reviewerAgent || state.workerValidation?.ok === false) return { graphSteps: [] };
       return options.nodes.reviewer(state);
     })
     .addNode('summary', async (state) => options.nodes.summary(state))
@@ -66,6 +69,8 @@ async function runVisibleSupervisorGraph(langgraph, options) {
     runID: options.runID,
     task: options.task,
     cleanTask: options.cleanTask,
+    workspaceContext: options.workspaceContext || {},
+    selectionReason: options.selectionReason || '',
     plannerAgent: options.plannerAgent,
     workerAgent: options.workerAgent,
     reviewerAgent: options.reviewerAgent || null,
@@ -75,6 +80,7 @@ async function runVisibleSupervisorGraph(langgraph, options) {
     coderAck: '',
     workerTask: '',
     workerOutput: '',
+    workerValidation: null,
     reviewTask: '',
     reviewerOutput: '',
     finalOutput: '',

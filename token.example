@@ -1,0 +1,8 @@
+# Copy this file to `token` for local development.
+# Keep `token` out of git.
+
+# ARK API key:
+# ark-...
+
+# ARK model / endpoint id:
+# EP:

@@ -265,7 +265,9 @@ async function delegateToAgent(args, context) {
 }
 
 async function workspaceRead(args, context) {
-  const root = await ensureWorkspace(context);
+  const workspace = await requireBoundWorkspace(context);
+  if (!workspace.ok) return workspace;
+  const root = workspace.path;
   const target = resolveWorkspacePath(root, args.path);
   if (!target.ok) return target;
 
@@ -290,7 +292,9 @@ async function workspaceRead(args, context) {
 
 async function workspaceWrite(args, context) {
   const content = typeof args.content === 'string' ? args.content : '';
-  const root = await ensureWorkspace(context);
+  const workspace = await requireBoundWorkspace(context);
+  if (!workspace.ok) return workspace;
+  const root = workspace.path;
   const target = resolveWorkspacePath(root, args.path);
   if (!target.ok) return target;
 
@@ -321,7 +325,9 @@ async function runBash(args, context) {
       error: 'bash is read-only for this agent; mutating shell commands require workspace_write',
     };
   }
-  const root = await ensureWorkspace(context);
+  const workspace = await requireBoundWorkspace(context);
+  if (!workspace.ok) return workspace;
+  const root = workspace.path;
   const cwdTarget = resolveWorkspacePath(root, typeof args.cwd === 'string' ? args.cwd : '.');
   if (!cwdTarget.ok) return cwdTarget;
   const timeoutMs = clampInteger(args.timeoutMs, 10000, 1000, 30000);
@@ -394,7 +400,9 @@ async function runLocalAgent(args, context) {
     };
   }
 
-  const root = await ensureWorkspace(context);
+  const workspace = await requireBoundWorkspace(context);
+  if (!workspace.ok) return workspace;
+  const root = workspace.path;
   const cwdTarget = resolveWorkspacePath(root, typeof args.cwd === 'string' ? args.cwd : '.');
   if (!cwdTarget.ok) return cwdTarget;
   const timeoutMs = clampInteger(args.timeoutMs, 120000, 10000, 600000);
@@ -469,8 +477,10 @@ function buildLocalAgentCommand(provider, task, options) {
       command: 'opencode',
       args: [
         'run',
+        '--dangerously-skip-permissions',
+        '--dir',
+        options.cwd,
         ...(options.model ? ['--model', options.model] : []),
-        '--prompt',
         task,
       ],
     };
@@ -604,11 +614,29 @@ function looksMutatingShellCommand(command) {
 }
 
 async function ensureWorkspace(context) {
+  if (context.workspacePath) {
+    const workspace = resolve(context.workspacePath);
+    await mkdir(workspace, { recursive: true });
+    return workspace;
+  }
   const root = resolve(context.workspaceRoot || new URL('../workspaces/', import.meta.url).pathname);
   const runID = sanitizeSegment(context.workspaceID || context.runID || context.event?.serverMsgID || 'default');
   const workspace = resolve(root, runID);
   await mkdir(workspace, { recursive: true });
   return workspace;
+}
+
+async function requireBoundWorkspace(context) {
+  if (!context.workspacePath) {
+    return {
+      ok: false,
+      error: '请先为当前会话选择工作区，然后再让 Agent 读取、写入或运行代码。',
+      code: 'WORKSPACE_REQUIRED',
+    };
+  }
+  const workspace = resolve(context.workspacePath);
+  await mkdir(workspace, { recursive: true });
+  return { ok: true, path: workspace };
 }
 
 function resolveWorkspacePath(root, inputPath) {

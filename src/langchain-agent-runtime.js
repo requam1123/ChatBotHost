@@ -129,6 +129,7 @@ function buildLangChainTools(config, agent, event, options, toolCalls) {
       workspaceRoot: config.workspaceRoot,
       runID: options.runID,
       workspaceID: options.workspaceID,
+      workspacePath: options.workspacePath,
     });
     toolCalls.push({
       toolCallID: `tool_${randomUUID()}`,

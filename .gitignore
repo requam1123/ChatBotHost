@@ -1,2 +1,25 @@
+# Runtime data
 data/*.json
-!.gitignore
+!data/.gitignore
+
+# Agent sandbox workspaces
+workspaces/
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Local secrets and config
+token
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.fleet/

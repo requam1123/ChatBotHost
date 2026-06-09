@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { readdir, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { loadConfig } from './config.js';
 import { createJsonServer, HttpError } from './http.js';
 import { JsonStore } from './storage.js';
@@ -17,6 +20,17 @@ import {
   normalizeGraphSteps,
   normalizeToolCalls,
 } from './run-records.js';
+import {
+  bindConversationWorkspace,
+  createWorkspace,
+  getConversationWorkspace,
+  listWorkspaceFiles,
+  listWorkspaces,
+  readWorkspaceFile,
+  requireWorkspace,
+  resolveEventWorkspace,
+  writeWorkspaceFile,
+} from './workspace-manager.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.storageDir);
@@ -66,6 +80,111 @@ const routes = [
   },
   {
     method: 'GET',
+    pattern: /^\/workspaces$/,
+    handler: async ({ url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const workspaces = await listWorkspaces({ store, ownerUserID });
+      return { workspaces, total: workspaces.length };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/filesystem\/directories$/,
+    handler: async ({ url }) => {
+      const requestedPath = url.searchParams.get('path') || '';
+      return listLocalDirectories({ config, requestedPath });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/workspaces$/,
+    handler: async ({ body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const targetPath = requiredString(body.targetPath, 'targetPath');
+      const workspace = await createWorkspace({
+        store,
+        config,
+        ownerUserID,
+        name: typeof body.name === 'string' ? body.name : '',
+        targetPath,
+      });
+      return { workspace };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/conversations\/(?<conversationID>[^/]+)\/workspace$/,
+    handler: async ({ params, url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const autoCreate = url.searchParams.get('autoCreate') === '1';
+      return getConversationWorkspace({
+        store,
+        config,
+        ownerUserID,
+        conversationID: decodeURIComponent(params.conversationID),
+        autoCreate,
+      });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/conversations\/(?<conversationID>[^/]+)\/workspace$/,
+    handler: async ({ params, body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const workspaceID = requiredString(body.workspaceID, 'workspaceID');
+      return bindConversationWorkspace({
+        store,
+        config,
+        ownerUserID,
+        conversationID: decodeURIComponent(params.conversationID),
+        workspaceID,
+      });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/workspaces\/(?<workspaceID>[^/]+)\/files$/,
+    handler: async ({ params, url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const workspace = await requireWorkspace({ store, config, ownerUserID, workspaceID: params.workspaceID });
+      return listWorkspaceFiles({
+        workspace,
+        source: url.searchParams.get('source') === 'target' ? 'target' : 'sandbox',
+        dir: url.searchParams.get('dir') || '',
+      });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/workspaces\/(?<workspaceID>[^/]+)\/file$/,
+    handler: async ({ params, url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const filePath = requiredString(url.searchParams.get('path'), 'path');
+      const workspace = await requireWorkspace({ store, config, ownerUserID, workspaceID: params.workspaceID });
+      return readWorkspaceFile({
+        workspace,
+        source: url.searchParams.get('source') === 'target' ? 'target' : 'sandbox',
+        filePath,
+      });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/workspaces\/(?<workspaceID>[^/]+)\/file$/,
+    handler: async ({ params, body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const filePath = requiredString(body.path, 'path');
+      const workspace = await requireWorkspace({ store, config, ownerUserID, workspaceID: params.workspaceID });
+      return writeWorkspaceFile({
+        workspace,
+        source: 'sandbox',
+        filePath,
+        content: typeof body.content === 'string' ? body.content : '',
+      });
+    },
+  },
+  {
+    method: 'GET',
     pattern: /^\/my\/agents$/,
     handler: async ({ url }) => {
       const ownerUserID = url.searchParams.get('ownerUserID');
@@ -95,6 +214,24 @@ const routes = [
         .filter((run) => run.userAgentID === params.userAgentID)
         .sort((a, b) => (b.startTime || b.createTime || 0) - (a.startTime || a.createTime || 0));
       return { runs: filtered.slice(0, limit), total: filtered.length };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/runs\/by-message\/(?<serverMsgID>[^/]+)$/,
+    handler: async ({ params, url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const serverMsgID = decodeURIComponent(params.serverMsgID);
+      const runs = await store.readCollection('agent-runs');
+      const run = runs
+        .filter((item) => item.ownerUserID === ownerUserID)
+        .find((item) =>
+          item.responseServerMsgID === serverMsgID ||
+          item.output?.serverMsgID === serverMsgID ||
+          (item.graphSteps || []).some((step) => step.serverMsgID === serverMsgID)
+        );
+      if (!run) throw new HttpError(404, 'Run not found for message');
+      return { run };
     },
   },
   {
@@ -369,6 +506,69 @@ function requiredString(value, name) {
   return value.trim();
 }
 
+async function listLocalDirectories({ config, requestedPath }) {
+  const roots = buildDirectoryRoots(config);
+  const currentPath = requestedPath.trim()
+    ? resolveLocalDirectoryPath(requestedPath)
+    : roots[0]?.path;
+
+  if (!currentPath) {
+    return { currentPath: '', parentPath: '', roots, directories: [] };
+  }
+
+  const info = await stat(currentPath).catch(() => null);
+  if (!info?.isDirectory()) {
+    throw new HttpError(400, 'path must be an existing directory');
+  }
+
+  const entries = await readdir(currentPath, { withFileTypes: true }).catch((err) => {
+    throw new HttpError(403, err instanceof Error ? err.message : 'Cannot read directory');
+  });
+  const directories = entries
+    .filter((entry) => entry.isDirectory() && !shouldHideDirectory(entry.name))
+    .map((entry) => ({
+      name: entry.name,
+      path: resolve(currentPath, entry.name),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const parentPath = dirname(currentPath);
+  return {
+    currentPath,
+    parentPath: parentPath === currentPath ? '' : parentPath,
+    roots,
+    directories,
+  };
+}
+
+function buildDirectoryRoots(config) {
+  const candidates = [
+    { name: '项目根目录', path: config.repoRoot },
+    { name: '工作区目录', path: config.workspaceRoot },
+    { name: '用户目录', path: homedir() },
+    { name: '上级目录', path: dirname(config.repoRoot) },
+    { name: '根目录', path: '/' },
+  ];
+  const seen = new Set();
+  return candidates
+    .map((item) => ({ name: item.name, path: resolve(item.path) }))
+    .filter((item) => {
+      if (seen.has(item.path)) return false;
+      seen.add(item.path);
+      return true;
+    });
+}
+
+function resolveLocalDirectoryPath(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return isAbsolute(trimmed) ? resolve(trimmed) : resolve(homedir(), trimmed);
+}
+
+function shouldHideDirectory(name) {
+  return ['.git', '.svn', '.hg', 'node_modules', '.nuxt', '.output', 'dist', 'build'].includes(name);
+}
+
 function parseMessageEvent(body) {
   return {
     conversationID: requiredString(body.conversationID, 'conversationID'),
@@ -385,14 +585,15 @@ function parseMessageEvent(body) {
 }
 
 async function runMockAgentReply(runID, agent, event) {
+  const workspaceContext = await resolveEventWorkspace({ store, config, event, ownerUserID: agent.ownerUserID });
   if (event.groupID && agent.runtime === 'langgraph-planner-worker') {
     try {
-      if (await handleGroupPlanConfirmation(runID, agent, event)) {
+      if (await handleGroupPlanConfirmation(runID, agent, event, workspaceContext)) {
         return;
       }
-      await runVisibleGroupCollaboration(runID, agent, event);
+      await runVisibleGroupCollaboration(runID, agent, event, workspaceContext);
     } catch (err) {
-      await sendGroupCollaborationError(runID, agent, event, err);
+      await sendGroupCollaborationError(runID, agent, event, err, workspaceContext);
     }
     return;
   }
@@ -404,9 +605,11 @@ async function runMockAgentReply(runID, agent, event) {
     parentRunID: '',
     depth: 0,
     allowDelegate: true,
+    ...workspaceContext,
   });
-  const replyText = result.content;
-  if (result.runtime === 'local-cli-agent') {
+  const runResult = attachWorkspaceResult(result, workspaceContext);
+  const replyText = runResult.content;
+  if (runResult.runtime === 'local-cli-agent') {
     const sent = await imClient.sendMessage({
       sendID: agent.imAgentUserID,
       recvID: event.groupID ? undefined : event.sendID,
@@ -431,7 +634,7 @@ async function runMockAgentReply(runID, agent, event) {
       },
       agent,
       event,
-      result,
+      result: runResult,
       startTime,
       endTime,
     }));
@@ -473,14 +676,14 @@ async function runMockAgentReply(runID, agent, event) {
     },
     agent,
     event,
-    result,
+    result: runResult,
     startTime,
     endTime,
   }));
   await store.writeCollection('agent-runs', runs);
 }
 
-async function handleGroupPlanConfirmation(runID, plannerAgent, event) {
+async function handleGroupPlanConfirmation(runID, plannerAgent, event, workspaceContext = {}) {
   const pendingPlans = await store.readCollection('pending-plans');
   const pendingIndex = findLatestPendingPlanIndex(pendingPlans, plannerAgent, event);
 
@@ -496,13 +699,13 @@ async function handleGroupPlanConfirmation(runID, plannerAgent, event) {
     await runVisibleGroupCollaboration(runID, plannerAgent, {
       ...event,
       content: pending.task,
-    });
+    }, workspaceContext);
     return true;
   }
 
   if (!wantsPlanConfirmation(event.content)) return false;
 
-  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
+  const { workerAgent, reviewerAgent, selectionReason } = await resolveGroupCollaborationAgents(plannerAgent, event);
   const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
   const cleanTask = stripMentionText(event.content, mentionNames);
   const planText = [
@@ -515,6 +718,7 @@ async function handleGroupPlanConfirmation(runID, plannerAgent, event) {
     '4. 生成完成后我汇总结果；真实写入仓库仍走 Patch 审批。',
     '',
     `执行 Agent：${workerAgent.nickname}`,
+    `选择理由：${selectionReason}`,
     '',
     '请回复 @Planner Agent 确认开始，我再继续执行。',
   ].join('\n');
@@ -575,6 +779,10 @@ async function handleGroupPlanConfirmation(runID, plannerAgent, event) {
       workerAgentID: workerAgent.userAgentID,
       workerAgentUserID: workerAgent.imAgentUserID,
       workerTemplateID: workerAgent.templateID,
+      workspaceID: workspaceContext.workspaceID || '',
+      workspaceName: workspaceContext.workspaceName || '',
+      workspacePath: workspaceContext.workspacePath || '',
+      workspaceTargetPath: workspaceContext.targetPath || '',
       finalOutput: planText,
       error: '',
     },
@@ -608,21 +816,21 @@ function isPlanConfirmation(content) {
   return /确认|同意|开始|执行|可以|按这个/.test(content || '');
 }
 
-async function runVisibleGroupCollaboration(runID, plannerAgent, event) {
+async function runVisibleGroupCollaboration(runID, plannerAgent, event, workspaceContext = {}) {
   if (langGraphSupervisorRuntime.available && langGraphSupervisorRuntime.runVisibleSupervisorGraph) {
     try {
-      await runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event);
+      await runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event, workspaceContext);
       return;
     } catch (err) {
       console.error('LangGraph supervisor visible collaboration failed, falling back to legacy flow', err);
     }
   }
-  await runVisibleGroupCollaborationLegacy(runID, plannerAgent, event);
+  await runVisibleGroupCollaborationLegacy(runID, plannerAgent, event, workspaceContext);
 }
 
-async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
+async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event, workspaceContext = {}) {
   const startTime = Date.now();
-  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
+  const { workerAgent, reviewerAgent, selectionReason } = await resolveGroupCollaborationAgents(plannerAgent, event);
 
   const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
   const cleanTask = stripMentionText(event.content, mentionNames);
@@ -631,7 +839,7 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
     : `@${event.sendID} 收到，我先规划一下：\n1. 代码实现交给 Coder\n2. Coder 完成后 @我 回传代码\n3. 我最后 @${event.sendID} 汇总最终结果`;
   const plannerAckMsg = await sendGroupText(plannerAgent, event.groupID, plannerAck, [event.sendID]);
 
-  const plannerDelegate = `@${workerAgent.nickname} 请完成这个代码任务：${cleanTask}`;
+  const plannerDelegate = `@${workerAgent.nickname} 请完成这个代码任务：${cleanTask}\n\n选择理由：${selectionReason}`;
   const plannerDelegateMsg = await sendGroupText(plannerAgent, event.groupID, plannerDelegate, [workerAgent.imAgentUserID]);
 
   const coderAck = `@${plannerAgent.nickname} 收到，我开始实现这个函数，并会把代码结果回传给你。`;
@@ -646,10 +854,13 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
     recvID: workerAgent.imAgentUserID,
     content: workerTask,
     serverMsgID: '',
-  }, { runID: workerRunID, workspaceID: runID, allowTools: true });
+  }, { runID: workerRunID, ...workspaceContext, allowTools: true });
   const workerEndTime = Date.now();
+  const workerValidation = validateWorkerResult(workerResult);
 
-  const coderResultText = `@${plannerAgent.nickname} 我完成了代码实现：\n\n${workerResult.content}`;
+  const coderResultText = workerValidation.ok
+    ? `@${plannerAgent.nickname} 我完成了代码实现：\n\n${workerResult.content}`
+    : `@${plannerAgent.nickname} 执行失败/无产物：\n\n${workerValidation.message}\n\n${workerResult.content}`;
   const coderResultMsg = await sendGroupText(workerAgent, event.groupID, coderResultText, [plannerAgent.imAgentUserID]);
 
   let reviewerAckMsg = null;
@@ -657,7 +868,7 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
   let reviewerResult = null;
   const allToolCalls = tagToolCalls(workerResult.toolCalls || [], 'worker', workerAgent);
   const resultGraphExtraSteps = [];
-  if (reviewerAgent) {
+  if (reviewerAgent && workerValidation.ok) {
     const plannerReviewRequest = `@${reviewerAgent.nickname} 请审查 Coder 的实现，重点看正确性、边界情况和可维护性。`;
     const plannerReviewMsg = await sendGroupText(plannerAgent, event.groupID, plannerReviewRequest, [reviewerAgent.imAgentUserID]);
     reviewerAckMsg = await sendGroupText(reviewerAgent, event.groupID, `@${plannerAgent.nickname} 收到，我开始审查 Coder 的代码。`, [plannerAgent.imAgentUserID]);
@@ -669,7 +880,7 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
       recvID: reviewerAgent.imAgentUserID,
       content: reviewTask,
       serverMsgID: '',
-    }, { runID: reviewerRunID, workspaceID: runID, allowTools: true });
+    }, { runID: reviewerRunID, ...workspaceContext, allowTools: true });
     allToolCalls.push(...tagToolCalls(reviewerResult.toolCalls || [], 'reviewer', reviewerAgent));
     reviewerResultMsg = await sendGroupText(
       reviewerAgent,
@@ -693,7 +904,9 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
     );
   }
 
-  const summaryTask = `Coder 已完成代码实现${reviewerResult ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${cleanTask}\n\nCoder 输出：\n${workerResult.content}${reviewerResult ? `\n\nReviewer 输出：\n${reviewerResult.content}` : ''}`;
+  const summaryTask = workerValidation.ok
+    ? `Coder 已完成代码实现${reviewerResult ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${cleanTask}\n\nCoder 输出：\n${workerResult.content}${reviewerResult ? `\n\nReviewer 输出：\n${reviewerResult.content}` : ''}`
+    : `执行 Agent 没有产生可交付产物。请面向用户总结失败原因，不要声称任务已经完成。\n\n用户原始任务：\n${cleanTask}\n\n校验结果：\n${workerValidation.message}\n\nWorker 输出：\n${workerResult.content}`;
   const summaryResult = await buildGraphNodeReply(plannerAgent, {
     ...event,
     content: summaryTask,
@@ -706,12 +919,12 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
     content: finalText,
     mode: 'langgraph-visible',
     runtime: 'langgraph-planner-worker',
-    status: 'success',
+    status: workerValidation.ok ? 'success' : 'failed',
     provider: summaryResult.provider || workerResult.provider || plannerAgent.provider || '',
     endpoint: summaryResult.endpoint || workerResult.endpoint || plannerAgent.endpoint || '',
     model: summaryResult.model || workerResult.model || plannerAgent.model || '',
     toolCalls: [],
-    error: '',
+    error: workerValidation.ok ? '' : workerValidation.message,
     graphSteps: [
       { node: 'planner_ack', output: plannerAck, serverMsgID: plannerAckMsg.serverMsgID, time: startTime },
       { node: 'planner_delegate', output: plannerDelegate, serverMsgID: plannerDelegateMsg.serverMsgID, time: startTime },
@@ -745,6 +958,10 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
     workerOutput: workerResult.content,
     toolCalls: allToolCalls,
     finalOutput: finalText,
+    workspaceID: workspaceContext.workspaceID || '',
+    workspaceName: workspaceContext.workspaceName || '',
+    workspacePath: workspaceContext.workspacePath || '',
+    workspaceTargetPath: workspaceContext.targetPath || '',
   };
 
   const runs = await store.readCollection('agent-runs');
@@ -767,9 +984,9 @@ async function runVisibleGroupCollaborationLegacy(runID, plannerAgent, event) {
   await store.writeCollection('agent-runs', runs);
 }
 
-async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event) {
+async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, event, workspaceContext = {}) {
   const startTime = Date.now();
-  const { workerAgent, reviewerAgent } = await resolveGroupCollaborationAgents(plannerAgent, event);
+  const { workerAgent, reviewerAgent, selectionReason } = await resolveGroupCollaborationAgents(plannerAgent, event);
   const mentionNames = [plannerAgent.nickname, workerAgent.nickname, reviewerAgent?.nickname].filter(Boolean);
   const cleanTask = stripMentionText(event.content, mentionNames);
 
@@ -781,6 +998,8 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
     workerAgent,
     reviewerAgent,
     event,
+    workspaceContext,
+    selectionReason,
     nodes: {
       plannerAck: async (state) => {
         const plannerAck = state.reviewerAgent
@@ -804,7 +1023,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
         };
       },
       plannerDelegate: async (state) => {
-        const plannerDelegate = `@${state.workerAgent.nickname} 请完成这个代码任务：${state.cleanTask}`;
+        const plannerDelegate = `@${state.workerAgent.nickname} 请完成这个代码任务：${state.cleanTask}\n\n选择理由：${state.selectionReason}`;
         const delegateMsg = await sendGroupText(state.plannerAgent, state.event.groupID, plannerDelegate, [state.workerAgent.imAgentUserID]);
         const workerAck = `@${state.plannerAgent.nickname} 收到，我开始执行，并会把结果回传给你。`;
         const ackMsg = await sendGroupText(state.workerAgent, state.event.groupID, workerAck, [state.plannerAgent.imAgentUserID]);
@@ -847,13 +1066,17 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
           recvID: state.workerAgent.imAgentUserID,
           content: state.workerTask,
           serverMsgID: '',
-        }, { runID: `${state.runID}_worker`, workspaceID: state.runID, allowTools: true });
+        }, { runID: `${state.runID}_worker`, ...state.workspaceContext, allowTools: true });
         const taggedToolCalls = tagToolCalls(workerResult.toolCalls || [], 'worker', state.workerAgent);
-        const workerResultText = `@${state.plannerAgent.nickname} 我完成了执行：\n\n${workerResult.content}`;
+        const workerValidation = validateWorkerResult(workerResult);
+        const workerResultText = workerValidation.ok
+          ? `@${state.plannerAgent.nickname} 我完成了执行：\n\n${workerResult.content}`
+          : `@${state.plannerAgent.nickname} 执行失败/无产物：\n\n${workerValidation.message}\n\n${workerResult.content}`;
         const resultMsg = await sendGroupText(state.workerAgent, state.event.groupID, workerResultText, [state.plannerAgent.imAgentUserID]);
         const nodeEndTime = Date.now();
         return {
           workerOutput: workerResult.content,
+          workerValidation,
           toolCalls: taggedToolCalls,
           graphSteps: [{
             node: 'worker',
@@ -886,7 +1109,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
           recvID: state.reviewerAgent.imAgentUserID,
           content: reviewTask,
           serverMsgID: '',
-        }, { runID: `${state.runID}_reviewer`, workspaceID: state.runID, allowTools: true });
+        }, { runID: `${state.runID}_reviewer`, ...state.workspaceContext, allowTools: true });
         const taggedToolCalls = tagToolCalls(reviewerResult.toolCalls || [], 'reviewer', state.reviewerAgent);
         const reviewerResultMsg = await sendGroupText(
           state.reviewerAgent,
@@ -943,7 +1166,9 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
       },
       summary: async (state) => {
         const nodeStartTime = Date.now();
-        const summaryTask = `${state.workerAgent.nickname} 已完成代码实现${state.reviewerOutput ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${state.cleanTask}\n\n${state.workerAgent.nickname} 输出：\n${state.workerOutput}${state.reviewerOutput ? `\n\nReviewer 输出：\n${state.reviewerOutput}` : ''}`;
+        const summaryTask = state.workerValidation?.ok === false
+          ? `执行 Agent 没有产生可交付产物。请面向用户总结失败原因，不要声称任务已经完成。\n\n用户原始任务：\n${state.cleanTask}\n\n校验结果：\n${state.workerValidation.message}\n\nWorker 输出：\n${state.workerOutput}`
+          : `${state.workerAgent.nickname} 已完成代码实现${state.reviewerOutput ? '，Reviewer 已完成审查' : ''}，请你面向用户总结最终结果，并保留核心代码。\n\n用户原始任务：\n${state.cleanTask}\n\n${state.workerAgent.nickname} 输出：\n${state.workerOutput}${state.reviewerOutput ? `\n\nReviewer 输出：\n${state.reviewerOutput}` : ''}`;
         const summaryResult = await buildGraphNodeReply(state.plannerAgent, {
           ...state.event,
           content: summaryTask,
@@ -979,7 +1204,7 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
     content: graphResult.finalOutput,
     mode: 'langgraph-supervisor',
     runtime: 'langgraph-supervisor',
-    status: 'success',
+    status: graphResult.workerValidation?.ok === false ? 'failed' : 'success',
     provider: plannerAgent.provider || '',
     endpoint: plannerAgent.endpoint || '',
     model: plannerAgent.model || '',
@@ -987,12 +1212,16 @@ async function runVisibleGroupCollaborationWithSupervisor(runID, plannerAgent, e
     graphSteps: normalizeGraphSteps(graphResult.graphSteps || []),
     artifacts: buildArtifactsFromToolCalls(toolCalls),
     approvals: [],
-    error: '',
+    error: graphResult.workerValidation?.ok === false ? graphResult.workerValidation.message : '',
     workerAgentID: workerAgent.userAgentID,
     workerAgentUserID: workerAgent.imAgentUserID,
     workerTemplateID: workerAgent.templateID,
     workerOutput: graphResult.workerOutput,
     finalOutput: graphResult.finalOutput,
+    workspaceID: workspaceContext.workspaceID || '',
+    workspaceName: workspaceContext.workspaceName || '',
+    workspacePath: workspaceContext.workspacePath || '',
+    workspaceTargetPath: workspaceContext.targetPath || '',
   };
 
   const runs = await store.readCollection('agent-runs');
@@ -1025,6 +1254,46 @@ function tagToolCalls(toolCalls, graphNode, agent) {
   }));
 }
 
+function validateWorkerResult(workerResult) {
+  if (!workerResult || workerResult.status === 'failed') {
+    return { ok: false, message: workerResult?.error || 'Worker execution failed' };
+  }
+  const toolCalls = Array.isArray(workerResult.toolCalls) ? workerResult.toolCalls : [];
+  if (toolCalls.length === 0) {
+    return { ok: true, message: 'Worker returned natural language output without tool trace' };
+  }
+
+  const failedExit = toolCalls.find((call) =>
+    Number.isFinite(call.result?.exitCode) && call.result.exitCode !== 0
+  );
+  if (failedExit) {
+    return { ok: false, message: `Tool ${failedExit.toolID} failed with exitCode ${failedExit.result.exitCode}` };
+  }
+
+  const hasWorkspaceWrite = toolCalls.some((call) =>
+    call.toolID === 'workspace_write' && call.result?.ok && call.result?.path
+  );
+  const hasLocalAgentFile = toolCalls.some((call) =>
+    call.toolID === 'local_agent_run' &&
+    call.result?.ok &&
+    Array.isArray(call.result.files) &&
+    call.result.files.length > 0
+  );
+  const hasStdoutOrStderr = toolCalls.some((call) =>
+    typeof call.result?.stdout === 'string' && call.result.stdout.trim() ||
+    typeof call.result?.stderr === 'string' && call.result.stderr.trim()
+  );
+  const hasSuccessfulToolTrace = toolCalls.some((call) => call.result?.ok);
+
+  if (!hasSuccessfulToolTrace) {
+    return { ok: false, message: 'Worker did not produce any successful tool trace' };
+  }
+  if (!hasWorkspaceWrite && !hasLocalAgentFile && !hasStdoutOrStderr) {
+    return { ok: false, message: 'Worker produced no stdout/stderr and no file changes' };
+  }
+  return { ok: true, message: 'Worker produced verifiable tool output' };
+}
+
 async function sendGroupText(agent, groupID, content, atUserIDList = []) {
   return imClient.sendMessage({
     sendID: agent.imAgentUserID,
@@ -1036,7 +1305,7 @@ async function sendGroupText(agent, groupID, content, atUserIDList = []) {
   });
 }
 
-async function sendGroupCollaborationError(runID, plannerAgent, event, err) {
+async function sendGroupCollaborationError(runID, plannerAgent, event, err, workspaceContext = {}) {
   const message = err instanceof Error ? err.message : '群聊协作启动失败';
   const content = `@${event.sendID} ${message}`;
   const sent = await sendGroupText(plannerAgent, event.groupID, content, [event.sendID]);
@@ -1074,6 +1343,10 @@ async function sendGroupCollaborationError(runID, plannerAgent, event, err) {
         endTime: now,
         time: now,
       }],
+      workspaceID: workspaceContext.workspaceID || '',
+      workspaceName: workspaceContext.workspaceName || '',
+      workspacePath: workspaceContext.workspacePath || '',
+      workspaceTargetPath: workspaceContext.targetPath || '',
       finalOutput: content,
       error: message,
     },
@@ -1135,6 +1408,7 @@ async function buildLocalCliAgentReply(agent, event, runContext = {}) {
     workspaceRoot: config.workspaceRoot,
     runID: runContext.runID,
     workspaceID: runContext.workspaceID,
+    workspacePath: runContext.workspacePath,
   });
   const toolCall = {
     toolCallID: `tool_${randomUUID()}`,
@@ -1151,17 +1425,34 @@ async function buildLocalCliAgentReply(agent, event, runContext = {}) {
     durationMs: Date.now() - startTime,
   };
 
+  const hasArtifact = hasUsableLocalAgentArtifact(result);
+  const isSuccess = Boolean(result.ok && hasArtifact);
+  const workspaceRequired = result?.code === 'WORKSPACE_REQUIRED';
+  const artifactError = result.ok && !hasArtifact
+    ? 'Local CLI agent exited successfully but produced no stdout, stderr, tool trace, or file changes'
+    : '';
   return {
-    content: summarizeLocalCliResult(provider, result),
+    content: workspaceRequired
+      ? '请先为当前会话选择工作区，然后我再读取、写入或运行代码。'
+      : summarizeLocalCliResult(provider, result),
     mode: 'local-cli-agent',
     runtime: 'local-cli-agent',
-    status: result.ok ? 'success' : 'failed',
+    status: isSuccess ? 'success' : 'failed',
     provider: 'local-cli',
     endpoint: '',
     model: provider,
     toolCalls: [toolCall],
-    error: result.ok ? '' : result.error || result.stderr || 'Local CLI agent failed',
+    error: isSuccess ? '' : artifactError || result.error || result.stderr || 'Local CLI agent failed',
   };
+}
+
+function hasUsableLocalAgentArtifact(result) {
+  if (!result || !result.ok) return false;
+  const files = Array.isArray(result.files) ? result.files : [];
+  const hasFiles = files.length > 0;
+  const hasStdout = typeof result.stdout === 'string' && result.stdout.trim().length > 0;
+  const hasStderr = typeof result.stderr === 'string' && result.stderr.trim().length > 0;
+  return hasFiles || hasStdout || hasStderr;
 }
 
 function inferLocalAgentProvider(agent) {
@@ -1172,11 +1463,12 @@ function inferLocalAgentProvider(agent) {
 
 function summarizeLocalCliResult(provider, result) {
   const files = Array.isArray(result.files) ? result.files : [];
+  const hasArtifact = hasUsableLocalAgentArtifact(result);
   const fileLines = files.length
     ? files.map((file) => `- ${file.status || 'file'} ${file.path || file.targetPath || file.sandboxPath || ''} (${file.bytes ?? '-'} bytes)`).join('\n')
     : '- no files changed';
   return [
-    `本地 ${provider} 执行完成。`,
+    hasArtifact ? `本地 ${provider} 执行完成。` : `本地 ${provider} 执行失败/无产物。`,
     '',
     `exitCode: ${result.exitCode ?? '-'}`,
     `timedOut: ${Boolean(result.timedOut)}`,
@@ -1203,6 +1495,7 @@ async function buildAgentReply(agent, event, runContext = {}) {
     return await generateLangChainAgentReply(config, agent, event, {
       runID: runContext.runID,
       workspaceID: runContext.workspaceID,
+      workspacePath: runContext.workspacePath,
       imClient,
       delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
     });
@@ -1218,6 +1511,7 @@ async function buildAgentReply(agent, event, runContext = {}) {
           workspaceRoot: config.workspaceRoot,
           runID: runContext.runID,
           workspaceID: runContext.workspaceID,
+          workspacePath: runContext.workspacePath,
           enabledToolIDs: agent.enabledToolIDs || [],
           delegateToAgent: (delegation) => delegateToAgent(agent, event, runContext, delegation),
         }),
@@ -1307,7 +1601,12 @@ async function delegateToAgent(sourceAgent, event, runContext, delegation) {
     delegatedByAgentID: sourceAgent.userAgentID,
     delegatedToAgentID: targetAgent.userAgentID,
     delegationTask: delegation.task,
+    workspaceID: runContext.workspaceID,
+    workspaceName: runContext.workspaceName,
+    workspacePath: runContext.workspacePath,
+    targetPath: runContext.targetPath,
   });
+  const runResult = attachWorkspaceResult(result, runContext);
   const endTime = Date.now();
 
   const runs = await store.readCollection('agent-runs');
@@ -1328,22 +1627,22 @@ async function delegateToAgent(sourceAgent, event, runContext, delegation) {
     },
     agent: targetAgent,
     event: childEvent,
-    result,
+    result: runResult,
     startTime,
     endTime,
   }));
   await store.writeCollection('agent-runs', runs);
 
   return {
-    ok: result.status === 'success',
+    ok: runResult.status === 'success',
     childRunID,
     delegatedToAgentID: targetAgent.userAgentID,
     delegatedToAgentUserID: targetAgent.imAgentUserID,
     delegatedToTemplateID: targetAgent.templateID,
     task: delegation.task,
-    output: result.content,
+    output: runResult.content,
     durationMs: endTime - startTime,
-    error: result.error || '',
+    error: runResult.error || '',
   };
 }
 
@@ -1420,6 +1719,10 @@ function buildRunRecord({
     provider: result.provider,
     endpoint: result.endpoint,
     model: result.model,
+    workspaceID: result.workspaceID || '',
+    workspaceName: result.workspaceName || '',
+    workspacePath: result.workspacePath || '',
+    workspaceTargetPath: result.workspaceTargetPath || '',
     graphSteps: normalizedGraphSteps,
     workerAgentID: result.workerAgentID || '',
     workerAgentUserID: result.workerAgentUserID || '',
@@ -1444,6 +1747,16 @@ function buildRunRecord({
     endTime,
     durationMs: endTime - startTime,
     createTime: endTime,
+  };
+}
+
+function attachWorkspaceResult(result, workspaceContext = {}) {
+  return {
+    ...result,
+    workspaceID: workspaceContext.workspaceID || result.workspaceID || '',
+    workspaceName: workspaceContext.workspaceName || result.workspaceName || '',
+    workspacePath: workspaceContext.workspacePath || result.workspacePath || '',
+    workspaceTargetPath: workspaceContext.targetPath || result.workspaceTargetPath || '',
   };
 }
 
@@ -1503,14 +1816,40 @@ async function resolveGroupCollaborationAgents(plannerAgent, event) {
   if (event.groupID && !groupWorker) {
     throw new HttpError(400, '这个群里还没有可执行的 Agent。请先把 Claude Code、Codex CLI、OpenCode 或 Coder 拉进群，再 @Planner Agent 分配任务。');
   }
+  const executableCount = groupAgents.filter((agent) =>
+    agent.imAgentUserID !== plannerAgent.imAgentUserID &&
+    agent.templateID !== 'reviewer'
+  ).length;
   const workerAgent = groupWorker || await requireWorkerAgent(plannerAgent, {
     agentUserID: plannerAgent.workerAgentUserID || '',
     templateID: plannerAgent.workerTemplateID || 'coder',
   });
+  const selectionReason = buildWorkerSelectionReason({
+    workerAgent,
+    mentionedWorker,
+    localCliWorker,
+    coderWorker,
+    executableCount,
+    hasGroup: Boolean(event.groupID),
+  });
   const reviewerAgent = event.groupID
     ? groupAgents.find((agent) => agent.templateID === 'reviewer') || null
     : await findOptionalAgent(plannerAgent, 'reviewer');
-  return { workerAgent, reviewerAgent };
+  return { workerAgent, reviewerAgent, selectionReason };
+}
+
+function buildWorkerSelectionReason({ workerAgent, mentionedWorker, localCliWorker, coderWorker, executableCount, hasGroup }) {
+  const prefix = hasGroup ? `当前群里有 ${executableCount} 个可执行 Agent。` : '';
+  if (mentionedWorker && workerAgent.userAgentID === mentionedWorker.userAgentID) {
+    return `${prefix}用户消息中显式 @ 了 ${workerAgent.nickname}，所以由它执行。`;
+  }
+  if (localCliWorker && workerAgent.userAgentID === localCliWorker.userAgentID) {
+    return `${prefix}${workerAgent.nickname} 是群里的本地 CLI Agent，适合执行代码任务。`;
+  }
+  if (coderWorker && workerAgent.userAgentID === coderWorker.userAgentID) {
+    return `${prefix}${workerAgent.nickname} 是群里的 Coder Agent，匹配代码实现任务。`;
+  }
+  return `${prefix}选择群内第一个可执行 Agent：${workerAgent.nickname}。`;
 }
 
 async function findGroupAgents(plannerAgent, event, userAgents) {
@@ -1538,6 +1877,9 @@ async function buildGraphNodeReply(agent, event, options = {}) {
     const result = await buildAgentReplyForRuntime(agent, event, {
       runID: options.runID || `graph_${randomUUID()}`,
       workspaceID: options.workspaceID,
+      workspaceName: options.workspaceName,
+      workspacePath: options.workspacePath,
+      targetPath: options.targetPath,
       allowDelegate: false,
       depth: 1,
     });

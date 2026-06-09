@@ -7,7 +7,7 @@ export function loadConfig() {
     imServerBaseURL: process.env.IM_SERVER_BASE_URL || 'http://localhost:3000',
     storageDir: process.env.CHATBOT_HOST_STORAGE_DIR || new URL('../data/', import.meta.url).pathname,
     workspaceRoot: process.env.CHATBOT_HOST_WORKSPACE_ROOT || new URL('../workspaces/', import.meta.url).pathname,
-    repoRoot: process.env.CHATBOT_HOST_REPO_ROOT || new URL('../../', import.meta.url).pathname,
+    repoRoot: process.env.CHATBOT_HOST_REPO_ROOT || new URL('../', import.meta.url).pathname,
     ark: {
       baseURL: process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3',
       apiKey: process.env.ARK_API_KEY || arkFromFile.apiKey,
@@ -17,9 +17,9 @@ export function loadConfig() {
 }
 
 function loadArkTokenFile() {
+  const tokenFile = process.env.CHATBOT_HOST_TOKEN_FILE || new URL('../token', import.meta.url).pathname;
   try {
-    const path = new URL('../../token', import.meta.url);
-    const raw = readFileSync(path, 'utf8');
+    const raw = readFileSync(tokenFile, 'utf8');
     const apiKey = raw.split(/\r?\n/).find((line) => line.trim().startsWith('ark-'))?.trim() || '';
     const model = raw.match(/EP[:：]\s*([^\s]+)/)?.[1] || '';
     return { apiKey, model };
