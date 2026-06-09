@@ -270,6 +270,52 @@ const routes = [
     },
   },
   {
+    method: 'POST',
+    pattern: /^\/my\/agents$/,
+    handler: async ({ body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const now = Date.now();
+      const userAgentID = `ua_${now}_${randomUUID().slice(0, 8)}`;
+      const imAgentUserID = `agent_custom_${ownerUserID}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      const agent = {
+        userAgentID,
+        ownerUserID,
+        templateID: 'custom',
+        imAgentUserID,
+        nickname: typeof body.nickname === 'string' ? body.nickname.trim() : 'Custom Agent',
+        avatarURL: typeof body.avatarURL === 'string' ? body.avatarURL.trim() : '',
+        credentialID: typeof body.credentialID === 'string' ? body.credentialID.trim() : '',
+        model: typeof body.model === 'string' ? body.model.trim() : 'gpt-4o-mini',
+        systemPrompt: typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '',
+        enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : [],
+        enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
+        runtime: typeof body.runtime === 'string' ? body.runtime.trim() : 'openai-tools',
+        workerTemplateID: typeof body.workerTemplateID === 'string' ? body.workerTemplateID.trim() : '',
+        workerAgentUserID: typeof body.workerAgentUserID === 'string' ? body.workerAgentUserID.trim() : '',
+        status: 'active',
+        createTime: now,
+        updateTime: now,
+      };
+
+      await imClient.registerAgentUser({
+        userID: imAgentUserID,
+        nickname: agent.nickname,
+        faceURL: agent.avatarURL,
+        agentPrompt: agent.systemPrompt,
+      });
+      await imClient.ensureFriendPair(ownerUserID, imAgentUserID);
+
+      const userAgents = await store.readCollection('agents');
+      userAgents.push(agent);
+      await store.writeCollection('agents', userAgents);
+
+      void connectAgentWs(agent);
+
+      return { agent };
+    },
+  },
+  {
     method: 'GET',
     pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)$/,
     handler: async ({ params }) => {
