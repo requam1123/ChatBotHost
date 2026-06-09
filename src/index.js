@@ -5,7 +5,7 @@ import { createJsonServer, HttpError } from './http.js';
 import { JsonStore } from './storage.js';
 import { ImClient } from './im-client.js';
 import { ImWsClient } from './im-ws-client.js';
-import { getTemplate, listActiveTemplates } from './market.js';
+import { createTemplate, deleteTemplate, getTemplate, listVisibleTemplates, updateTemplate } from './market.js';
 import { discoverMcpTools } from './mcp-client.js';
 import { findTools, listTools, toolCatalog } from './tools.js';
 import { applyPatchProposal, createPatchPreview } from './patch-manager.js';
@@ -124,19 +124,129 @@ const routes = [
     pattern: /^\/tools$/,
     handler: async ({ url }) => {
       const templateID = url.searchParams.get('agentTemplateID');
-      const template = templateID ? requireTemplate(templateID) : undefined;
+      const template = templateID ? await requireTemplate(templateID) : undefined;
       return { tools: listTools({ template }), total: listTools({ template }).length };
     },
   },
   {
     method: 'GET',
-    pattern: /^\/market\/agents$/,
-    handler: async () => ({
-      agents: listActiveTemplates().map((template) => ({
+    pattern: /^\/templates$/,
+    handler: async ({ url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const templates = await listVisibleTemplates(store, ownerUserID);
+      const result = templates.map((template) => ({
         ...template,
-        tools: findTools(template.defaultToolIDs),
-      })),
-    }),
+        tools: findTools(template.enabledToolIDs),
+      }));
+      return { templates: result };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/templates$/,
+    handler: async ({ body }) => {
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const avatarURL = typeof body.avatarURL === 'string' ? body.avatarURL.trim() : '';
+      const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '';
+      const enabledToolIDs = Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : [];
+      const description = typeof body.description === 'string' ? body.description.trim() : '';
+      const tags = Array.isArray(body.tags) ? body.tags.filter((t) => typeof t === 'string') : [];
+      const template = await createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags });
+      return { template };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/templates\/(?<templateID>[^/]+)$/,
+    handler: async ({ params }) => {
+      const template = await getTemplate(store, params.templateID);
+      if (!template) throw new HttpError(404, `Template not found: ${params.templateID}`);
+      return { template };
+    },
+  },
+  {
+    method: 'PATCH',
+    pattern: /^\/templates\/(?<templateID>[^/]+)$/,
+    handler: async ({ params, url, body }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const updates = {};
+      for (const key of ['name', 'avatarURL', 'systemPrompt', 'enabledToolIDs', 'description', 'tags', 'isPublic']) {
+        if (body[key] !== undefined) updates[key] = body[key];
+      }
+      const template = await updateTemplate(store, params.templateID, ownerUserID, updates);
+      return { template };
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: /^\/templates\/(?<templateID>[^/]+)$/,
+    handler: async ({ params, url }) => {
+      const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
+      const template = await deleteTemplate(store, params.templateID, ownerUserID);
+      return { template };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/templates\/(?<templateID>[^/]+)\/instantiate$/,
+    handler: async ({ params, body }) => {
+      const template = await getTemplate(store, params.templateID);
+      if (!template) throw new HttpError(404, `Template not found: ${params.templateID}`);
+      const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
+      const now = Date.now();
+
+      const userAgents = await store.readCollection('agents');
+      const existing = userAgents.find(
+        (agent) => agent.ownerUserID === ownerUserID && agent.templateID === template.templateID,
+      );
+      if (existing) return { agent: existing, created: false };
+
+      const userAgentID = `ua_${randomUUID()}`;
+      const imAgentUserID = `agent_${template.templateID}_${ownerUserID}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const agent = {
+        userAgentID,
+        ownerUserID,
+        templateID: template.templateID,
+        imAgentUserID,
+        nickname: typeof body.nickname === 'string' ? body.nickname.trim() : template.name,
+        avatarURL: typeof body.avatarURL === 'string' ? body.avatarURL.trim() : template.avatarURL,
+        credentialID: typeof body.credentialID === 'string' ? body.credentialID.trim() : '',
+        systemPrompt: template.systemPrompt,
+        enabledToolIDs: template.enabledToolIDs,
+        enabledMcpConnectionIDs: [],
+        status: 'active',
+        createTime: now,
+        updateTime: now,
+      };
+
+      await imClient.registerAgentUser({
+        userID: imAgentUserID,
+        nickname: agent.nickname,
+        faceURL: agent.avatarURL,
+        agentPrompt: agent.systemPrompt,
+      });
+      await imClient.ensureFriendPair(ownerUserID, imAgentUserID);
+
+      userAgents.push(agent);
+      await store.writeCollection('agents', userAgents);
+
+      void connectAgentWs(agent);
+
+      return { agent, created: true };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/market\/agents$/,
+    handler: async () => {
+      const templates = await listVisibleTemplates(store, 'public');
+      const agents = templates.map((template) => ({
+        ...template,
+        tools: findTools(template.enabledToolIDs),
+      }));
+      return { agents };
+    },
   },
   {
     method: 'GET',
@@ -275,9 +385,6 @@ const routes = [
         systemPrompt: typeof body.systemPrompt === 'string' ? body.systemPrompt.trim() : '',
         enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : [],
         enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
-        runtime: typeof body.runtime === 'string' ? body.runtime.trim() : 'langchain-agent',
-        workerTemplateID: typeof body.workerTemplateID === 'string' ? body.workerTemplateID.trim() : '',
-        workerAgentUserID: typeof body.workerAgentUserID === 'string' ? body.workerAgentUserID.trim() : '',
         status: 'active',
         createTime: now,
         updateTime: now,
@@ -461,7 +568,8 @@ const routes = [
     method: 'POST',
     pattern: /^\/market\/agents\/(?<templateID>[^/]+)\/add$/,
     handler: async ({ params, body }) => {
-      const template = requireTemplate(params.templateID);
+      const template = await getTemplate(store, params.templateID);
+      if (!template) throw new HttpError(404, `Template not found: ${params.templateID}`);
       const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
       const now = Date.now();
 
@@ -478,15 +586,12 @@ const routes = [
         ownerUserID,
         templateID: template.templateID,
         imAgentUserID,
-        nickname: body.nickname || template.name,
-        avatarURL: body.avatarURL || template.avatarURL,
-        credentialID: body.credentialID || '',
-        systemPrompt: body.systemPrompt || template.defaultSystemPrompt,
-        enabledToolIDs: Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : template.defaultToolIDs,
-        enabledMcpConnectionIDs: Array.isArray(body.enabledMcpConnectionIDs) ? body.enabledMcpConnectionIDs : [],
-        runtime: body.runtime || template.defaultRuntime || 'langchain-agent',
-        workerTemplateID: body.workerTemplateID || template.defaultWorkerTemplateID || 'coder',
-        workerAgentUserID: body.workerAgentUserID || '',
+        nickname: typeof body.nickname === 'string' ? body.nickname.trim() : template.name,
+        avatarURL: typeof body.avatarURL === 'string' ? body.avatarURL.trim() : template.avatarURL,
+        credentialID: typeof body.credentialID === 'string' ? body.credentialID.trim() : '',
+        systemPrompt: template.systemPrompt,
+        enabledToolIDs: template.enabledToolIDs,
+        enabledMcpConnectionIDs: [],
         status: 'active',
         createTime: now,
         updateTime: now,
@@ -537,7 +642,7 @@ const routes = [
       const ownerUserID = requiredString(url.searchParams.get('ownerUserID'), 'ownerUserID');
       const credentials = await store.readCollection('credentials');
       const userCredentials = credentials.filter((cred) =>
-        cred.ownerUserID === ownerUserID || cred.ownerUserID === 'anonymous'
+        cred.ownerUserID === ownerUserID || cred.ownerUserID === 'public'
       );
       return { credentials: userCredentials, total: userCredentials.length };
     },
@@ -572,7 +677,7 @@ const routes = [
       const index = credentials.findIndex((cred) => cred.credentialID === params.credentialID);
       if (index === -1) throw new HttpError(404, 'Credential not found');
       const ownerUserID = url.searchParams.get('ownerUserID') || '';
-      if (credentials[index].ownerUserID !== 'anonymous' && credentials[index].ownerUserID !== ownerUserID) {
+      if (credentials[index].ownerUserID !== 'public' && credentials[index].ownerUserID !== ownerUserID) {
         throw new HttpError(403, 'Cannot modify this credential');
       }
       const updates = {};
@@ -592,8 +697,8 @@ const routes = [
       const index = credentials.findIndex((cred) => cred.credentialID === params.credentialID);
       if (index === -1) throw new HttpError(404, 'Credential not found');
       const ownerUserID = url.searchParams.get('ownerUserID') || '';
-      if (credentials[index].ownerUserID === 'anonymous') {
-        throw new HttpError(403, 'Cannot delete anonymous credential');
+      if (credentials[index].ownerUserID === 'public') {
+        throw new HttpError(403, 'Cannot delete public credential');
       }
       if (credentials[index].ownerUserID !== ownerUserID) {
         throw new HttpError(403, 'Cannot delete this credential');
@@ -685,9 +790,9 @@ if (createdAgents) {
   void startAgentWsConnections();
 }
 
-function requireTemplate(templateID) {
-  const template = getTemplate(templateID);
-  if (!template) throw new HttpError(404, `Agent template not found: ${templateID}`);
+async function requireTemplate(templateID) {
+  const template = await getTemplate(store, templateID);
+  if (!template) throw new HttpError(404, `Template not found: ${templateID}`);
   return template;
 }
 
@@ -723,7 +828,7 @@ async function requireCredential(credentialID, url) {
   const credential = credentials.find((cred) => cred.credentialID === credentialID);
   if (!credential) throw new HttpError(404, 'Credential not found');
   const ownerUserID = url.searchParams.get('ownerUserID') || '';
-  if (credential.ownerUserID !== 'anonymous' && credential.ownerUserID !== ownerUserID && ownerUserID) {
+  if (credential.ownerUserID !== 'public' && credential.ownerUserID !== ownerUserID && ownerUserID) {
     throw new HttpError(403, 'Cannot access this credential');
   }
   return credential;
@@ -803,19 +908,8 @@ function parseMessageEvent(body) {
 
 function sanitizeAgentUpdates(body) {
   const updates = {};
-  for (const key of [
-    'nickname',
-    'avatarURL',
-    'credentialID',
-    'systemPrompt',
-    'runtime',
-    'workerTemplateID',
-    'workerAgentUserID',
-  ]) {
+  for (const key of ['nickname', 'avatarURL', 'credentialID']) {
     if (typeof body[key] === 'string') updates[key] = body[key].trim();
-  }
-  if (updates.runtime && !['langchain-agent'].includes(updates.runtime)) {
-    delete updates.runtime;
   }
   if (Array.isArray(body.enabledToolIDs)) {
     const validIDs = new Set(listTools().map((tool) => tool.toolID));

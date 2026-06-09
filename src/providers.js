@@ -74,7 +74,7 @@ export async function resolveProviderConfig(store, agent) {
     credential = credentials.find((cred) => cred.credentialID === agent.credentialID);
   }
   if (!credential) {
-    credential = credentials.find((cred) => cred.ownerUserID === 'anonymous');
+    credential = credentials.find((cred) => cred.ownerUserID === 'public');
   }
 
   if (!credential) {

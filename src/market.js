@@ -1,58 +1,75 @@
-export const agentTemplates = [
-  {
-    templateID: 'planner',
-    name: 'Planner Agent',
-    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=planner',
-    defaultSystemPrompt: 'You are a planning agent. Break user goals into clear, verifiable steps.',
-    defaultToolIDs: ['get_current_time', 'read_conversation_messages'],
-    defaultRuntime: 'langchain-agent',
-    defaultWorkerTemplateID: 'coder',
-    description: 'Breaks goals into plans and coordinates follow-up work.',
-    tags: ['planning', 'workflow'],
-    status: 'active',
-  },
-  {
-    templateID: 'coder',
-    name: 'Coder Agent',
-    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=coder',
-    defaultSystemPrompt: 'You are a coding agent. Prefer small, tested changes and explain tradeoffs clearly.',
-    defaultToolIDs: ['get_current_time', 'read_conversation_messages', 'workspace_read', 'workspace_write', 'bash'],
-    defaultRuntime: 'langchain-agent',
-    defaultWorkerTemplateID: '',
-    description: 'Helps with code analysis, implementation planning, and controlled edits.',
-    tags: ['coding', 'review'],
-    status: 'active',
-  },
-  {
-    templateID: 'chatgpt',
-    name: 'ChatGPT',
-    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=chatgpt',
-    defaultSystemPrompt: 'You are a helpful assistant. Be concise and accurate.',
-    defaultToolIDs: ['get_current_time'],
-    defaultRuntime: 'langchain-agent',
-    defaultWorkerTemplateID: '',
-    description: 'General-purpose conversational assistant.',
-    tags: ['general'],
-    status: 'active',
-  },
-  {
-    templateID: 'reviewer',
-    name: 'Reviewer Agent',
-    avatarURL: 'https://api.dicebear.com/7.x/bottts/svg?seed=reviewer',
-    defaultSystemPrompt: 'You are a code review agent. Review implementation quality, edge cases, maintainability, and risks. Return concise actionable feedback.',
-    defaultToolIDs: ['get_current_time', 'read_conversation_messages', 'workspace_read', 'bash'],
-    defaultRuntime: 'langchain-agent',
-    defaultWorkerTemplateID: '',
-    description: 'Reviews code for correctness, edge cases, and maintainability.',
-    tags: ['review', 'quality'],
-    status: 'active',
-  },
-];
+import { randomUUID } from 'node:crypto';
 
-export function listActiveTemplates() {
-  return agentTemplates.filter((template) => template.status === 'active');
+export async function listVisibleTemplates(store, ownerUserID) {
+  const templates = await store.readCollection('templates');
+  return templates.filter(
+    (t) => t.ownerUserID === 'public' || t.ownerUserID === ownerUserID,
+  );
 }
 
-export function getTemplate(templateID) {
-  return listActiveTemplates().find((template) => template.templateID === templateID);
+export async function getTemplate(store, templateID) {
+  const templates = await store.readCollection('templates');
+  return templates.find((t) => t.templateID === templateID);
+}
+
+export async function createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags }) {
+  const templates = await store.readCollection('templates');
+  const now = Date.now();
+  const template = {
+    templateID: `tmpl_${randomUUID()}`,
+    ownerUserID,
+    name: name || '',
+    avatarURL: avatarURL || '',
+    systemPrompt: systemPrompt || '',
+    enabledToolIDs: Array.isArray(enabledToolIDs) ? enabledToolIDs : [],
+    description: description || '',
+    tags: Array.isArray(tags) ? tags : [],
+    status: 'active',
+    createTime: now,
+    updateTime: now,
+  };
+  templates.push(template);
+  await store.writeCollection('templates', templates);
+  return { template };
+}
+
+export async function updateTemplate(store, templateID, ownerUserID, updates) {
+  const templates = await store.readCollection('templates');
+  const index = templates.findIndex((t) => t.templateID === templateID);
+  if (index === -1) return null;
+
+  const current = templates[index];
+  if (current.ownerUserID !== ownerUserID) {
+    if (current.ownerUserID === 'public') return null;
+    return null;
+  }
+
+  const allowedKeys = ['name', 'avatarURL', 'systemPrompt', 'enabledToolIDs', 'description', 'tags', 'status'];
+  for (const key of allowedKeys) {
+    if (updates[key] !== undefined) {
+      if (key === 'enabledToolIDs' || key === 'tags') {
+        templates[index][key] = Array.isArray(updates[key]) ? updates[key] : current[key];
+      } else {
+        templates[index][key] = updates[key];
+      }
+    }
+  }
+  templates[index].updateTime = Date.now();
+  await store.writeCollection('templates', templates);
+  return { template: templates[index] };
+}
+
+export async function deleteTemplate(store, templateID, ownerUserID) {
+  const templates = await store.readCollection('templates');
+  const index = templates.findIndex((t) => t.templateID === templateID);
+  if (index === -1) return null;
+
+  if (templates[index].ownerUserID !== ownerUserID) {
+    if (templates[index].ownerUserID === 'public') return null;
+    return null;
+  }
+
+  const deleted = templates.splice(index, 1)[0];
+  await store.writeCollection('templates', templates);
+  return { template: deleted };
 }

@@ -21,26 +21,10 @@ export function initReplyServices({ store, imClient, config, langGraphRuntime })
   ctx = { store, imClient, config, langGraphRuntime };
 }
 
-export async function runMockAgentReply(runID, agent, event, {
-  handleGroupPlanConfirmation, runVisibleGroupCollaboration, sendGroupCollaborationError,
-}) {
+export async function runMockAgentReply(runID, agent, event, _unused) {
   const { store, imClient, config } = ctx;
   log.info(`开始 Agent 回复: runID=${runID}, agent=${agent.nickname || agent.templateID}, runtime=${agent.runtime}, conversation=${event.conversationID}`);
   const workspaceContext = await resolveEventWorkspace({ store, config, event, ownerUserID: agent.ownerUserID });
-
-  if (event.groupID && agent.runtime === 'langgraph-planner-worker') {
-    log.info(`群组 Planner-Worker 流程: groupID=${event.groupID}`);
-    try {
-      if (await handleGroupPlanConfirmation(runID, agent, event, workspaceContext)) {
-        return;
-      }
-      await runVisibleGroupCollaboration(runID, agent, event, workspaceContext);
-    } catch (err) {
-      log.error(`群组协作失败: groupID=${event.groupID}`, err);
-      await sendGroupCollaborationError(runID, agent, event, err, workspaceContext);
-    }
-    return;
-  }
 
   const startTime = Date.now();
   const result = await buildAgentReplyForRuntime(agent, event, {
@@ -99,9 +83,6 @@ export async function runMockAgentReply(runID, agent, event, {
 }
 
 export async function buildAgentReplyForRuntime(agent, event, runContext = {}) {
-  if (agent.runtime === 'langgraph-planner-worker') {
-    return buildLangGraphAgentReply(agent, event, runContext);
-  }
   return buildAgentReply(agent, event, runContext);
 }
 
@@ -140,9 +121,9 @@ async function buildAgentReply(agent, event, runContext = {}) {
         content: `${agent.nickname} 暂时无法连接模型，已收到你的消息：${event.content}`,
         mode: 'fallback',
         status: 'failed',
-        provider: agent.provider || '',
-        endpoint: agent.endpoint || '',
-        model: (await resolveProviderConfig(store, agent)).model,
+        provider: '',
+        endpoint: '',
+        model: '',
         toolCalls: [],
         error: fallbackMessage,
       };
@@ -277,7 +258,6 @@ export async function delegateToAgent(sourceAgent, event, runContext, delegation
     childRunID,
     delegatedToAgentID: targetAgent.userAgentID,
     delegatedToAgentUserID: targetAgent.imAgentUserID,
-    delegatedToTemplateID: targetAgent.templateID,
     task: delegation.task,
     output: runResult.content,
     durationMs: endTime - startTime,
@@ -354,20 +334,11 @@ export function buildRunRecord({
     responseServerMsgID,
     status: result.status,
     mode: result.mode,
-    runtime: result.runtime || agent.runtime || 'openai-tools',
-    provider: result.provider,
-    endpoint: result.endpoint,
     model: result.model,
     workspaceID: result.workspaceID || '',
     workspaceName: result.workspaceName || '',
     workspacePath: result.workspacePath || '',
     workspaceTargetPath: result.workspaceTargetPath || '',
-    graphSteps: normalizedGraphSteps,
-    workerAgentID: result.workerAgentID || '',
-    workerAgentUserID: result.workerAgentUserID || '',
-    workerTemplateID: result.workerTemplateID || '',
-    workerOutput: result.workerOutput || '',
-    finalOutput: result.finalOutput || output.content,
     input: {
       sendID: event.sendID,
       recvID: event.recvID,
