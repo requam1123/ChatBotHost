@@ -1,0 +1,18 @@
+# ChatBotHost configuration
+# Priority: environment variable > config.yaml > default value
+
+# HTTP server port (env: CHATBOT_HOST_PORT)
+port: 3100
+
+# IM server URLs
+imServerBaseURL: http://localhost:3000
+imServerWSURL: ws://localhost:3000
+
+# Storage directory for JSON collections (env: CHATBOT_HOST_STORAGE_DIR)
+storageDir: ./data
+
+# Workspace sandbox root (env: CHATBOT_HOST_WORKSPACE_ROOT)
+workspaceRoot: ./workspaces
+
+# Repository root (env: CHATBOT_HOST_REPO_ROOT)
+repoRoot: .
