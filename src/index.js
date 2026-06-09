@@ -56,7 +56,7 @@ async function connectAgentWs(agent) {
     token,
     platformID: 12,
     onMessage: (payload) => {
-      void handleIncomingMessage(payload).catch((err) => {
+      void handleIncomingMessage(payload, agent).catch((err) => {
         log.error('WS 消息处理失败', err);
       });
     },
@@ -74,7 +74,7 @@ async function startAgentWsConnections() {
   log.info(`WebSocket 连接完成: ${wsConnections.size} 个`);
 }
 
-async function handleIncomingMessage(payload) {
+async function handleIncomingMessage(payload, connectedAgent) {
   const msgData = payload.msgData || payload;
   const conversationID = payload.conversationID || msgData.conversationID || '';
 
@@ -91,14 +91,23 @@ async function handleIncomingMessage(payload) {
     mentionedAgentIDs: [],
   };
 
-  const userAgents = await store.readCollection('agents');
-  const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
+  let agent;
+
+  if (event.groupID && connectedAgent && event.atUserIDList.includes(connectedAgent.imAgentUserID)) {
+    agent = connectedAgent;
+  }
+
+  if (!agent && event.recvID) {
+    const userAgents = await store.readCollection('agents');
+    agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
+  }
+
   if (!agent) {
-    log.warn(`未找到 Agent 绑定: recvID=${event.recvID}`);
+    log.warn(`未找到 Agent 绑定: recvID=${event.recvID}, groupID=${event.groupID}`);
     return;
   }
 
-  log.info(`收到 IM 消息: from=${event.sendID}, to=${event.recvID}(${agent.nickname || agent.templateID}), conversation=${event.conversationID}, content="${truncateText(event.content, 80)}"`);
+  log.info(`收到 IM 消息: from=${event.sendID}, to=${event.recvID || event.groupID}(${agent.nickname || agent.templateID}), conversation=${event.conversationID}, content="${truncateText(event.content, 80)}"`);
 
   const runID = `run_${randomUUID()}`;
   void runMockAgentReply(runID, agent, event).catch((err) => {
