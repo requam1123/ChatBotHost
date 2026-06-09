@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { createJsonServer, HttpError } from './http.js';
 import { JsonStore } from './storage.js';
 import { ImClient } from './im-client.js';
+import { ImWsClient } from './im-ws-client.js';
 import { getTemplate, listActiveTemplates } from './market.js';
 import { executeToolCall, findTools, listTools, toolCatalog } from './tools.js';
 import { generateAgentReply, testAgentProvider } from './providers.js';
@@ -37,6 +38,66 @@ const store = new JsonStore(config.storageDir);
 const imClient = new ImClient(config.imServerBaseURL);
 const langGraphRuntime = await createLangGraphRuntime();
 const langGraphSupervisorRuntime = await createLangGraphSupervisorRuntime();
+
+const wsConnections = new Map();
+
+async function connectAgentWs(agent) {
+  if (!agent.imAgentUserID) return;
+  const existing = wsConnections.get(agent.imAgentUserID);
+  if (existing) existing.disconnect();
+
+  const token = await imClient.getToken(agent.imAgentUserID, 12);
+  const client = new ImWsClient({
+    wsURL: config.imServerWSURL,
+    agentUserID: agent.imAgentUserID,
+    token,
+    platformID: 12,
+    onMessage: (payload) => {
+      void handleIncomingMessage(payload).catch((err) => {
+        console.error('WS message handler failed', err);
+      });
+    },
+  });
+  wsConnections.set(agent.imAgentUserID, client);
+  client.connect();
+}
+
+async function startAgentWsConnections() {
+  const userAgents = await store.readCollection('user-agents');
+  for (const agent of userAgents) {
+    await connectAgentWs(agent);
+  }
+  console.log(`[WS] Connected ${wsConnections.size} agent WebSocket(s)`);
+}
+
+async function handleIncomingMessage(payload) {
+  const msgData = payload.msgData || payload;
+  const conversationID = payload.conversationID || msgData.conversationID || '';
+
+  const event = {
+    conversationID,
+    sendID: msgData.sendID || '',
+    recvID: msgData.recvID || '',
+    groupID: msgData.groupID || '',
+    content: msgData.content || '',
+    serverMsgID: msgData.serverMsgID || '',
+    contentType: msgData.contentType || 101,
+    sessionType: msgData.sessionType || 1,
+    atUserIDList: Array.isArray(msgData.atUserIDList) ? msgData.atUserIDList : [],
+    mentionedAgentIDs: [],
+  };
+
+  const userAgents = await store.readCollection('user-agents');
+  const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
+  if (!agent) return;
+
+  const runID = `run_${randomUUID()}`;
+  void runMockAgentReply(runID, agent, event).catch((err) => {
+    console.error('Mock agent reply failed', err);
+  });
+}
+
+void startAgentWsConnections();
 
 const routes = [
   {
@@ -346,6 +407,9 @@ const routes = [
 
       userAgents[index] = agent;
       await store.writeCollection('user-agents', userAgents);
+
+      void connectAgentWs(agent);
+
       return { agent };
     },
   },
@@ -397,6 +461,8 @@ const routes = [
 
       userAgents.push(agent);
       await store.writeCollection('user-agents', userAgents);
+
+      void connectAgentWs(agent);
 
       return { agent, created: true };
     },
