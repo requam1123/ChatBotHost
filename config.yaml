@@ -5,8 +5,8 @@
 port: 3100
 
 # IM server URLs
-imServerBaseURL: http://localhost:3000
-imServerWSURL: ws://localhost:3000
+imServerBaseURL: http://115.120.81.43:20250
+imServerWSURL: ws://115.120.81.43:20250
 
 # Storage directory for JSON collections (env: CHATBOT_HOST_STORAGE_DIR)
 storageDir: ./data
