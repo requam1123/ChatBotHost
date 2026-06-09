@@ -152,7 +152,8 @@ const routes = [
       const enabledToolIDs = Array.isArray(body.enabledToolIDs) ? body.enabledToolIDs : [];
       const description = typeof body.description === 'string' ? body.description.trim() : '';
       const tags = Array.isArray(body.tags) ? body.tags.filter((t) => typeof t === 'string') : [];
-      const template = await createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags });
+      const greeting = typeof body.greeting === 'string' ? body.greeting.trim() : '';
+      const template = await createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags, greeting });
       return { template };
     },
   },
@@ -227,6 +228,16 @@ const routes = [
         agentPrompt: agent.systemPrompt,
       });
       await imClient.ensureFriendPair(ownerUserID, imAgentUserID);
+
+      if (template.greeting) {
+        await imClient.sendMessage({
+          sendID: imAgentUserID,
+          recvID: ownerUserID,
+          content: template.greeting,
+          senderNickname: agent.nickname,
+          senderFaceURL: agent.avatarURL,
+        }).catch((err) => log.warn(`发送 greeting 失败: ${err.message}`));
+      }
 
       userAgents.push(agent);
       await store.writeCollection('agents', userAgents);
@@ -604,6 +615,16 @@ const routes = [
         agentPrompt: agent.systemPrompt,
       });
       await imClient.ensureFriendPair(ownerUserID, imAgentUserID);
+
+      if (template.greeting) {
+        await imClient.sendMessage({
+          sendID: imAgentUserID,
+          recvID: ownerUserID,
+          content: template.greeting,
+          senderNickname: agent.nickname,
+          senderFaceURL: agent.avatarURL,
+        }).catch((err) => log.warn(`发送 greeting 失败: ${err.message}`));
+      }
 
       userAgents.push(agent);
       await store.writeCollection('agents', userAgents);

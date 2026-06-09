@@ -12,7 +12,7 @@ export async function getTemplate(store, templateID) {
   return templates.find((t) => t.templateID === templateID);
 }
 
-export async function createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags }) {
+export async function createTemplate(store, { ownerUserID, name, avatarURL, systemPrompt, enabledToolIDs, description, tags, greeting }) {
   const templates = await store.readCollection('templates');
   const now = Date.now();
   const template = {
@@ -24,6 +24,7 @@ export async function createTemplate(store, { ownerUserID, name, avatarURL, syst
     enabledToolIDs: Array.isArray(enabledToolIDs) ? enabledToolIDs : [],
     description: description || '',
     tags: Array.isArray(tags) ? tags : [],
+    greeting: greeting || '',
     status: 'active',
     createTime: now,
     updateTime: now,
@@ -44,7 +45,7 @@ export async function updateTemplate(store, templateID, ownerUserID, updates) {
     return null;
   }
 
-  const allowedKeys = ['name', 'avatarURL', 'systemPrompt', 'enabledToolIDs', 'description', 'tags', 'status'];
+  const allowedKeys = ['name', 'avatarURL', 'systemPrompt', 'enabledToolIDs', 'description', 'tags', 'greeting', 'status'];
   for (const key of allowedKeys) {
     if (updates[key] !== undefined) {
       if (key === 'enabledToolIDs' || key === 'tags') {
