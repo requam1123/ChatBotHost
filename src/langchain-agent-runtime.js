@@ -21,6 +21,39 @@ const toolSchemas = {
     atUserIDList: z.array(z.string()).optional(),
   }),
   get_group_members: z.object({}),
+  list_group_agents: z.object({}),
+  send_agent_task: z.object({
+    targetAgentUserIDs: z.array(z.string()).optional(),
+    targetTemplateIDs: z.array(z.string()).optional(),
+    taskID: z.string().optional(),
+    parentTaskID: z.string().optional(),
+    title: z.string().optional(),
+    role: z.string().optional(),
+    task: z.string(),
+    context: z.string().optional(),
+  }),
+  send_agent_result: z.object({
+    taskID: z.string().optional(),
+    parentTaskID: z.string().optional(),
+    title: z.string().optional(),
+    result: z.string(),
+    status: z.string().optional(),
+    replyToAgentUserID: z.string().optional(),
+    requesterUserID: z.string().optional(),
+  }),
+  query_agent_task_results: z.object({
+    conversationID: z.string().optional(),
+    taskID: z.string().optional(),
+    parentTaskID: z.string().optional(),
+    limit: z.number().min(1).max(100).optional(),
+  }),
+  send_agent_summary: z.object({
+    taskID: z.string().optional(),
+    parentTaskID: z.string().optional(),
+    title: z.string().optional(),
+    summary: z.string(),
+    requesterUserID: z.string().optional(),
+  }),
   delegate_to_agent: z.object({
     agentUserID: z.string().optional(),
     templateID: z.string().optional(),
@@ -128,11 +161,13 @@ function buildLangChainTools(store, agent, event, options, toolCalls, mcpConnect
   const builtinTools = enabledToolDefs.map((toolDef) => tool(async (args) => {
     const startTime = Date.now();
     const result = await executeToolCall(toolDef.toolID, args, {
+      store,
       agent,
       event,
       imClient: options.imClient,
       enabledToolIDs: agent.enabledToolIDs || [],
       delegateToAgent: options.delegateToAgent,
+      agentMessage: options.agentMessage,
       workspaceRoot: store.config?.workspaceRoot || '',
       runID: options.runID,
       workspaceID: options.workspaceID,
@@ -161,11 +196,13 @@ function buildLangChainTools(store, agent, event, options, toolCalls, mcpConnect
       return tool(async (args) => {
         const startTime = Date.now();
         const result = await executeToolCall(prefixedId, args, {
+          store,
           agent,
           event,
           imClient: options.imClient,
           enabledToolIDs: agent.enabledToolIDs || [],
           delegateToAgent: options.delegateToAgent,
+          agentMessage: options.agentMessage,
           workspaceRoot: store.config?.workspaceRoot || '',
           runID: options.runID,
           workspaceID: options.workspaceID,
@@ -203,6 +240,13 @@ You are running as a LangChain agent with real tools. Use tools when they are us
 2. Use workspace_read when you need to inspect files.
 3. Use bash to run a small verification command.
 4. Return a concise final answer with files touched, commands run, and results.
+
+For group multi-agent collaboration, agents coordinate through IM messages:
+- Use list_group_agents before assigning work in a group.
+- Use send_agent_task to assign work to one or more target agents. A message that mentions multiple target agents lets them run independently in parallel.
+- If you receive an agent_task, complete your part and use send_agent_result when available so the assigning agent is mentioned back.
+- If you receive agent_result messages and you are coordinating, use query_agent_task_results to inspect collected results, then send_agent_summary to report the final answer to the requester.
+- Do not use delegate_to_agent for group collaboration unless the user explicitly asks for a private synchronous subcall.
 
 Do not claim you executed a command unless you called the bash tool. Do not claim you wrote a file unless you called workspace_write.`;
 }

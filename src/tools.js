@@ -4,6 +4,18 @@ import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from './logger.js';
 import { executeMcpTool, parseMcpToolId } from './mcp-client.js';
+import {
+  AgentContentType,
+  buildAgentMessageContent,
+  buildAgentResultPayload,
+  buildAgentSummaryPayload,
+  buildAgentTaskPayload,
+  formatAgentResultDisplay,
+  formatAgentSummaryDisplay,
+  formatAgentTaskDisplay,
+  normalizeTaskID,
+  parseAgentMessagePayload,
+} from './agent-message-protocol.js';
 
 const log = createLogger('tools');
 
@@ -63,6 +75,103 @@ export const toolCatalog = [
     riskLevel: 'low',
     source: 'builtin',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    enabled: true,
+  },
+  {
+    toolID: 'list_group_agents',
+    name: 'List Group Agents',
+    description: 'List the agent accounts in the current group chat, enriched with agent template, nickname, userAgentID and available tool IDs. Use this before assigning tasks in a group.',
+    category: 'safe_read',
+    riskLevel: 'low',
+    source: 'builtin',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    enabled: true,
+  },
+  {
+    toolID: 'send_agent_task',
+    name: 'Send Agent Task',
+    description: 'Assign a task to one or more agents in the current group by sending an agent_task IM message that mentions the target agents. Each target agent runs independently when it receives the message.',
+    category: 'external_api',
+    riskLevel: 'medium',
+    source: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetAgentUserIDs: { type: 'array', items: { type: 'string' } },
+        targetTemplateIDs: { type: 'array', items: { type: 'string' } },
+        taskID: { type: 'string' },
+        parentTaskID: { type: 'string' },
+        title: { type: 'string' },
+        role: { type: 'string' },
+        task: { type: 'string' },
+        context: { type: 'string' },
+      },
+      required: ['task'],
+      additionalProperties: false,
+    },
+    enabled: true,
+  },
+  {
+    toolID: 'send_agent_result',
+    name: 'Send Agent Result',
+    description: 'Report an assigned task result back to the assigning agent by sending an agent_result IM message and mentioning that agent.',
+    category: 'external_api',
+    riskLevel: 'medium',
+    source: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskID: { type: 'string' },
+        parentTaskID: { type: 'string' },
+        title: { type: 'string' },
+        result: { type: 'string' },
+        status: { type: 'string' },
+        replyToAgentUserID: { type: 'string' },
+        requesterUserID: { type: 'string' },
+      },
+      required: ['result'],
+      additionalProperties: false,
+    },
+    enabled: true,
+  },
+  {
+    toolID: 'query_agent_task_results',
+    name: 'Query Agent Task Results',
+    description: 'Read recent agent_result messages from the current conversation, optionally filtered by taskID or parentTaskID.',
+    category: 'safe_read',
+    riskLevel: 'low',
+    source: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversationID: { type: 'string' },
+        taskID: { type: 'string' },
+        parentTaskID: { type: 'string' },
+        limit: { type: 'number', minimum: 1, maximum: 100 },
+      },
+      additionalProperties: false,
+    },
+    enabled: true,
+  },
+  {
+    toolID: 'send_agent_summary',
+    name: 'Send Agent Summary',
+    description: 'Send a final agent_summary IM message to the original requester in the current group.',
+    category: 'external_api',
+    riskLevel: 'medium',
+    source: 'builtin',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskID: { type: 'string' },
+        parentTaskID: { type: 'string' },
+        title: { type: 'string' },
+        summary: { type: 'string' },
+        requesterUserID: { type: 'string' },
+      },
+      required: ['summary'],
+      additionalProperties: false,
+    },
     enabled: true,
   },
   {
@@ -203,6 +312,21 @@ export async function executeToolCall(toolID, args, context) {
       case 'get_group_members':
         result = await getGroupMembers(args, context);
         break;
+      case 'list_group_agents':
+        result = await listGroupAgents(args, context);
+        break;
+      case 'send_agent_task':
+        result = await sendAgentTask(args, context);
+        break;
+      case 'send_agent_result':
+        result = await sendAgentResult(args, context);
+        break;
+      case 'query_agent_task_results':
+        result = await queryAgentTaskResults(args, context);
+        break;
+      case 'send_agent_summary':
+        result = await sendAgentSummary(args, context);
+        break;
       case 'delegate_to_agent':
         result = await delegateToAgent(args, context);
         break;
@@ -247,7 +371,13 @@ async function readConversationMessages(args, context) {
     .map((msg) => ({
       sendID: msg.sendID,
       recvID: msg.recvID,
+      groupID: msg.groupID,
+      senderNickname: msg.senderNickname,
+      contentType: msg.contentType,
       content: msg.content,
+      atUserIDList: msg.atUserIDList || [],
+      attachedInfo: msg.attachedInfo || '',
+      ex: msg.ex || '',
       sendTime: msg.sendTime,
       serverMsgID: msg.serverMsgID,
     }));
@@ -298,6 +428,229 @@ async function sendImMessage(args, context) {
     ok: true,
     serverMsgID: sent.serverMsgID,
     conversationID: sent.conversationID || context.event.conversationID,
+  };
+}
+
+async function listGroupAgents(_args, context) {
+  const groupAgents = await getCurrentGroupAgents(context);
+  if (!groupAgents.ok) return groupAgents;
+  return {
+    ok: true,
+    groupID: context.event.groupID,
+    count: groupAgents.agents.length,
+    agents: groupAgents.agents.map((agent) => ({
+      userAgentID: agent.userAgentID,
+      imAgentUserID: agent.imAgentUserID,
+      nickname: agent.nickname || agent.templateID,
+      templateID: agent.templateID,
+      ownerUserID: agent.ownerUserID,
+      status: agent.status || 'active',
+      enabledToolIDs: agent.enabledToolIDs || [],
+      isSelf: agent.imAgentUserID === context.agent.imAgentUserID,
+    })),
+  };
+}
+
+async function sendAgentTask(args, context) {
+  if (!context.event.groupID) {
+    return { ok: false, error: 'send_agent_task only works in group conversations' };
+  }
+  const task = typeof args.task === 'string' ? args.task.trim() : '';
+  if (!task) return { ok: false, error: 'task is required' };
+
+  const groupAgents = await getCurrentGroupAgents(context);
+  if (!groupAgents.ok) return groupAgents;
+
+  const targetAgentUserIDs = arrayOfStrings(args.targetAgentUserIDs);
+  const targetTemplateIDs = new Set(arrayOfStrings(args.targetTemplateIDs));
+  const targets = uniqueAgents(groupAgents.agents.filter((agent) => {
+    if (agent.imAgentUserID === context.agent.imAgentUserID) return false;
+    if (targetAgentUserIDs.includes(agent.imAgentUserID) || targetAgentUserIDs.includes(agent.userAgentID)) return true;
+    return targetTemplateIDs.size > 0 && targetTemplateIDs.has(agent.templateID);
+  }));
+
+  if (targets.length === 0) {
+    return {
+      ok: false,
+      error: 'No target agents found in this group. Use list_group_agents first, then pass targetAgentUserIDs or targetTemplateIDs.',
+    };
+  }
+
+  const taskID = normalizeTaskID(args.taskID || context.event.agentMessage?.taskID);
+  const payload = buildAgentTaskPayload({
+    taskID,
+    parentTaskID: stringArg(args.parentTaskID) || context.event.agentMessage?.taskID || '',
+    title: stringArg(args.title),
+    role: stringArg(args.role),
+    task,
+    context: stringArg(args.context),
+    sourceAgent: context.agent,
+    requesterUserID: context.event.agentMessage?.requesterUserID || nonAgentRequesterID(context),
+    targetAgents: targets,
+    metadata: {
+      conversationID: context.event.conversationID,
+      groupID: context.event.groupID,
+      requestServerMsgID: context.event.serverMsgID || '',
+      runID: context.runID || '',
+    },
+  });
+
+  const display = formatAgentTaskDisplay(payload);
+  const sent = await context.imClient.sendMessage({
+    sendID: context.agent.imAgentUserID,
+    groupID: context.event.groupID,
+    contentType: AgentContentType.Task,
+    content: display,
+    ex: buildAgentMessageContent(payload),
+    atUserIDList: targets.map((agent) => agent.imAgentUserID),
+    senderNickname: context.agent.nickname,
+    senderFaceURL: context.agent.avatarURL,
+  });
+
+  return {
+    ok: true,
+    taskID,
+    serverMsgID: sent.serverMsgID,
+    conversationID: sent.conversationID || context.event.conversationID,
+    targetAgents: targets.map((agent) => ({
+      userAgentID: agent.userAgentID,
+      imAgentUserID: agent.imAgentUserID,
+      nickname: agent.nickname || agent.templateID,
+      templateID: agent.templateID,
+    })),
+  };
+}
+
+async function sendAgentResult(args, context) {
+  const result = typeof args.result === 'string' ? args.result.trim() : '';
+  if (!result) return { ok: false, error: 'result is required' };
+
+  const replyToAgentUserID = stringArg(args.replyToAgentUserID)
+    || context.event.agentMessage?.sourceAgentUserID
+    || (isAgentUserID(context.event.sendID) ? context.event.sendID : '');
+  if (context.event.groupID && !replyToAgentUserID) {
+    return { ok: false, error: 'replyToAgentUserID is required when no assigning agent is known' };
+  }
+
+  const payload = buildAgentResultPayload({
+    taskID: stringArg(args.taskID) || context.event.agentMessage?.taskID || '',
+    parentTaskID: stringArg(args.parentTaskID) || context.event.agentMessage?.parentTaskID || '',
+    title: stringArg(args.title) || context.event.agentMessage?.title || '',
+    result,
+    status: stringArg(args.status) || 'success',
+    sourceAgent: context.agent,
+    replyToAgentUserID,
+    requesterUserID: stringArg(args.requesterUserID) || context.event.agentMessage?.requesterUserID || '',
+    metadata: {
+      conversationID: context.event.conversationID,
+      groupID: context.event.groupID || '',
+      requestServerMsgID: context.event.serverMsgID || '',
+      runID: context.runID || '',
+      targetAgentUserIDs: context.event.agentMessage?.targetAgentUserIDs || [],
+      targetAgentNicknames: context.event.agentMessage?.targetAgentNicknames || [],
+    },
+  });
+
+  const sent = await context.imClient.sendMessage({
+    sendID: context.agent.imAgentUserID,
+    recvID: context.event.groupID ? undefined : replyToAgentUserID || context.event.sendID,
+    groupID: context.event.groupID || undefined,
+    contentType: AgentContentType.Result,
+    content: formatAgentResultDisplay(payload),
+    ex: buildAgentMessageContent(payload),
+    atUserIDList: replyToAgentUserID ? [replyToAgentUserID] : [],
+    senderNickname: context.agent.nickname,
+    senderFaceURL: context.agent.avatarURL,
+  });
+
+  return {
+    ok: true,
+    taskID: payload.taskID,
+    serverMsgID: sent.serverMsgID,
+    conversationID: sent.conversationID || context.event.conversationID,
+    replyToAgentUserID,
+  };
+}
+
+async function queryAgentTaskResults(args, context) {
+  const requestedConversationID = typeof args.conversationID === 'string' ? args.conversationID.trim() : '';
+  const conversationID = isCurrentConversationAlias(requestedConversationID)
+    ? context.event.conversationID
+    : requestedConversationID || context.event.conversationID;
+  const limit = clampInteger(args.limit, 20, 1, 100);
+  const taskID = stringArg(args.taskID);
+  const parentTaskID = stringArg(args.parentTaskID);
+  const token = await context.imClient.getToken(context.agent.imAgentUserID);
+  const data = await context.imClient.post('/msg/search_msg', {
+    conversationID,
+    contentType: AgentContentType.Result,
+    pageNumber: 1,
+    showNumber: limit,
+  }, token);
+
+  const results = (data.chatLogs || [])
+    .map((item) => item.chatLog || item)
+    .map((msg) => ({ msg, payload: parseAgentMessagePayload(msg) }))
+    .filter((item) => item.payload)
+    .filter((item) => !taskID || item.payload.taskID === taskID)
+    .filter((item) => !parentTaskID || item.payload.parentTaskID === parentTaskID)
+    .reverse()
+    .map((item) => ({
+      taskID: item.payload.taskID,
+      parentTaskID: item.payload.parentTaskID,
+      title: item.payload.title,
+      status: item.payload.status,
+      result: item.payload.result,
+      sourceAgentUserID: item.payload.sourceAgentUserID,
+      sourceAgentNickname: item.payload.sourceAgentNickname,
+      requesterUserID: item.payload.requesterUserID,
+      metadata: item.payload.metadata || {},
+      serverMsgID: item.msg.serverMsgID,
+      sendTime: item.msg.sendTime,
+    }));
+
+  return { ok: true, conversationID, count: results.length, results };
+}
+
+async function sendAgentSummary(args, context) {
+  const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+  if (!summary) return { ok: false, error: 'summary is required' };
+  const requesterUserID = stringArg(args.requesterUserID)
+    || context.event.agentMessage?.requesterUserID
+    || nonAgentRequesterID(context);
+  const payload = buildAgentSummaryPayload({
+    taskID: stringArg(args.taskID) || context.event.agentMessage?.taskID || '',
+    parentTaskID: stringArg(args.parentTaskID) || context.event.agentMessage?.parentTaskID || '',
+    title: stringArg(args.title) || context.event.agentMessage?.title || '',
+    summary,
+    sourceAgent: context.agent,
+    requesterUserID,
+    metadata: {
+      conversationID: context.event.conversationID,
+      groupID: context.event.groupID || '',
+      requestServerMsgID: context.event.serverMsgID || '',
+      runID: context.runID || '',
+    },
+  });
+
+  const sent = await context.imClient.sendMessage({
+    sendID: context.agent.imAgentUserID,
+    recvID: context.event.groupID ? undefined : requesterUserID || context.event.sendID,
+    groupID: context.event.groupID || undefined,
+    contentType: AgentContentType.Summary,
+    content: formatAgentSummaryDisplay(payload),
+    ex: buildAgentMessageContent(payload),
+    atUserIDList: requesterUserID ? [requesterUserID] : [],
+    senderNickname: context.agent.nickname,
+    senderFaceURL: context.agent.avatarURL,
+  });
+
+  return {
+    ok: true,
+    taskID: payload.taskID,
+    serverMsgID: sent.serverMsgID,
+    conversationID: sent.conversationID || context.event.conversationID,
+    requesterUserID,
   };
 }
 
@@ -460,6 +813,61 @@ async function runBash(args, context) {
       resolvePromise(result);
     });
   });
+}
+
+async function getCurrentGroupAgents(context) {
+  if (!context.event.groupID) {
+    return { ok: false, error: 'This is not a group conversation' };
+  }
+  if (!context.store) {
+    return { ok: false, error: 'Agent store is not available in this runtime' };
+  }
+  try {
+    const [members, userAgents] = await Promise.all([
+      context.imClient.getGroupMembers(context.event.groupID, context.agent.ownerUserID),
+      context.store.readCollection('agents'),
+    ]);
+    const memberIDs = new Set(members.map((member) => member.userID).filter(Boolean));
+    const agents = userAgents.filter((agent) =>
+      agent.ownerUserID === context.agent.ownerUserID &&
+      agent.status !== 'disabled' &&
+      memberIDs.has(agent.imAgentUserID)
+    );
+    return { ok: true, agents };
+  } catch (err) {
+    return { ok: false, error: `Failed to resolve group agents: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+function uniqueAgents(agents) {
+  const seen = new Set();
+  const result = [];
+  for (const agent of agents) {
+    const key = agent.imAgentUserID || agent.userAgentID;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(agent);
+  }
+  return result;
+}
+
+function arrayOfStrings(value) {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+    : [];
+}
+
+function stringArg(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isAgentUserID(value) {
+  return typeof value === 'string' && value.startsWith('agent_');
+}
+
+function nonAgentRequesterID(context) {
+  const requester = context.event.agentMessage?.requesterUserID || context.event.sendID || '';
+  return isAgentUserID(requester) ? '' : requester;
 }
 
 function looksMutatingShellCommand(command) {

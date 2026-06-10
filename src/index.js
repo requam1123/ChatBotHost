@@ -32,6 +32,7 @@ import {
   runMockAgentReply,
   truncateText,
 } from './agent-reply.js';
+import { parseAgentMessagePayload } from './agent-message-protocol.js';
 import { seedData } from './seed.js';
 
 const config = loadConfig();
@@ -92,7 +93,14 @@ async function handleIncomingMessage(payload, connectedAgent) {
     sessionType: msgData.sessionType || 1,
     atUserIDList: Array.isArray(msgData.atUserIDList) ? msgData.atUserIDList : [],
     mentionedAgentIDs: [],
+    attachedInfo: typeof msgData.attachedInfo === 'string' ? msgData.attachedInfo : '',
+    ex: typeof msgData.ex === 'string' ? msgData.ex : '',
   };
+  event.agentMessage = parseAgentMessagePayload(event);
+
+  if (connectedAgent?.imAgentUserID && event.sendID === connectedAgent.imAgentUserID) {
+    return;
+  }
 
   let agent;
 
@@ -692,8 +700,10 @@ const routes = [
     handler: async ({ body }) => {
       const event = parseMessageEvent(body);
       const userAgents = await store.readCollection('agents');
-      const agent = userAgents.find((item) => item.imAgentUserID === event.recvID);
-      if (!agent) throw new HttpError(404, `Agent binding not found: ${event.recvID}`);
+      const agent = event.groupID
+        ? userAgents.find((item) => event.atUserIDList.includes(item.imAgentUserID))
+        : userAgents.find((item) => item.imAgentUserID === event.recvID);
+      if (!agent) throw new HttpError(404, `Agent binding not found: ${event.recvID || event.atUserIDList.join(',')}`);
 
       const runID = `run_${randomUUID()}`;
       void runMockAgentReply(runID, agent, event).catch((err) => {
@@ -966,18 +976,27 @@ async function requireAgentRun(userAgentID, runID) {
 }
 
 function parseMessageEvent(body) {
-  return {
+  const recvID = typeof body.recvID === 'string' ? body.recvID : '';
+  const groupID = typeof body.groupID === 'string' ? body.groupID : '';
+  if (!recvID && !groupID) {
+    throw new HttpError(400, 'recvID or groupID is required');
+  }
+  const event = {
     conversationID: requiredString(body.conversationID, 'conversationID'),
     sendID: requiredString(body.sendID, 'sendID'),
-    recvID: requiredString(body.recvID, 'recvID'),
-    groupID: typeof body.groupID === 'string' ? body.groupID : '',
+    recvID,
+    groupID,
     content: typeof body.content === 'string' ? body.content : '',
     serverMsgID: typeof body.serverMsgID === 'string' ? body.serverMsgID : '',
     contentType: typeof body.contentType === 'number' ? body.contentType : 101,
     sessionType: typeof body.sessionType === 'number' ? body.sessionType : 1,
     atUserIDList: Array.isArray(body.atUserIDList) ? body.atUserIDList.filter((id) => typeof id === 'string') : [],
     mentionedAgentIDs: Array.isArray(body.mentionedAgentIDs) ? body.mentionedAgentIDs.filter((id) => typeof id === 'string') : [],
+    attachedInfo: typeof body.attachedInfo === 'string' ? body.attachedInfo : '',
+    ex: typeof body.ex === 'string' ? body.ex : '',
   };
+  event.agentMessage = parseAgentMessagePayload(event);
+  return event;
 }
 
 function sanitizeAgentUpdates(body) {

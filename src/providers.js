@@ -219,7 +219,16 @@ function buildSystemPrompt(agent, enabledTools) {
   if (enabledTools.length === 0) return base;
   return `${base}
 
-You may call the provided tools when they are useful. Use get_current_time for current time questions. Use read_conversation_messages only when conversation context is needed. Use delegate_to_agent when a task should be handled by a more suitable specialist agent; prefer templateID such as "coder", "planner", or "chatgpt" if the exact agentUserID is unknown. After a delegated agent returns, synthesize the result into your final answer. Do not call send_im_message unless the user explicitly asks you to send a separate IM message; normal answers should be returned as assistant text.`;
+You may call the provided tools when they are useful.
+
+For group multi-agent collaboration, agents coordinate through IM messages:
+- Use list_group_agents before assigning work in a group.
+- Use send_agent_task to assign work to one or more target agents. A message that mentions multiple target agents lets them run independently in parallel.
+- If you receive an agent_task, complete your part and use send_agent_result when available so the assigning agent is mentioned back.
+- If you receive agent_result messages and you are coordinating, use query_agent_task_results to inspect collected results, then send_agent_summary to report the final answer to the requester.
+- Do not use delegate_to_agent for group collaboration unless the user explicitly asks for a private synchronous subcall.
+
+Use get_current_time for current time questions. Use read_conversation_messages only when conversation context is needed. Do not call send_im_message unless the user explicitly asks you to send a separate ordinary IM message; normal answers should be returned as assistant text.`;
 }
 
 function buildMockReply(agent, event) {

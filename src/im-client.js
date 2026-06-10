@@ -62,7 +62,18 @@ export class ImClient {
     return Array.isArray(data.members) ? data.members : [];
   }
 
-  async sendMessage({ sendID, recvID, groupID, content, senderNickname, senderFaceURL, atUserIDList = [], contentType }) {
+  async sendMessage({
+    sendID,
+    recvID,
+    groupID,
+    content,
+    senderNickname,
+    senderFaceURL,
+    atUserIDList = [],
+    contentType,
+    attachedInfo = '',
+    ex = '',
+  }) {
     const contentPreview = truncateText(content, 100);
     const target = groupID ? `group(${groupID})` : recvID;
     log.info(`发送消息: from=${sendID}, to=${target}, content="${contentPreview}"`);
@@ -78,6 +89,8 @@ export class ImClient {
       senderPlatformID: 12,
       senderNickname,
       senderFaceURL,
+      attachedInfo,
+      ex,
     }, token);
     if (result.serverMsgID) {
       log.info(`消息发送成功: serverMsgID=${result.serverMsgID}`);
