@@ -351,11 +351,28 @@ async function workspaceWrite(args, context) {
   try {
     await mkdir(dirname(target.path), { recursive: true });
     await writeFile(target.path, content, 'utf8');
-    return {
+    const result = {
       ok: true,
       path: target.relativePath,
       bytes: Buffer.byteLength(content),
     };
+    if (context.imClient && context.agent) {
+      void context.imClient.sendMessage({
+        sendID: context.agent.imAgentUserID,
+        recvID: context.event.groupID ? undefined : context.event.sendID,
+        groupID: context.event.groupID || undefined,
+        contentType: 126,
+        content: JSON.stringify({
+          path: target.relativePath,
+          content,
+          runID: context.runID || '',
+          userAgentID: context.agent.userAgentID || '',
+        }),
+        senderNickname: context.agent.nickname,
+        senderFaceURL: context.agent.avatarURL,
+      }).catch((err) => log.warn(`workspace_write send FileChanged 失败: ${err.message}`));
+    }
+    return result;
   } catch (err) {
     return {
       ok: false,
@@ -480,6 +497,10 @@ async function ensureWorkspace(context) {
 
 async function requireBoundWorkspace(context) {
   if (!context.workspacePath) {
+    if (context.workspaceRoot) {
+      const workspace = await ensureWorkspace(context);
+      return { ok: true, path: workspace };
+    }
     return {
       ok: false,
       error: '请先为当前会话选择工作区，然后再让 Agent 读取、写入或运行代码。',

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { copyFile, mkdir, stat as fsStat } from 'node:fs/promises';
+import { dirname, relative, resolve as resolvePath } from 'node:path';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { createJsonServer, HttpError } from './http.js';
@@ -15,6 +17,7 @@ import {
 } from './run-records.js';
 import {
   bindConversationWorkspace,
+  createEmptyWorkspace,
   createWorkspace,
   getConversationWorkspace,
   listWorkspaceFiles,
@@ -126,6 +129,13 @@ const routes = [
       service: 'ChatBotHost',
       imServerBaseURL: config.imServerBaseURL,
       time: Date.now(),
+    }),
+  },
+  {
+    method: 'GET',
+    pattern: /^\/workspace-mode$/,
+    handler: async () => ({
+      mode: config.workspaceMode,
     }),
   },
   {
@@ -286,7 +296,7 @@ const routes = [
     pattern: /^\/workspaces$/,
     handler: async ({ body }) => {
       const ownerUserID = requiredString(body.ownerUserID, 'ownerUserID');
-      const targetPath = requiredString(body.targetPath, 'targetPath');
+      const targetPath = typeof body.targetPath === 'string' ? body.targetPath.trim() : '';
       const workspace = await createWorkspace({
         store,
         config,
@@ -550,6 +560,47 @@ const routes = [
     },
   },
   {
+    method: 'POST',
+    pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)\/runs\/(?<runID>[^/]+)\/file\/apply$/,
+    handler: async ({ params, body }) => {
+      const filePath = requiredString(body.path, 'path');
+      const run = (await requireAgentRun(params.userAgentID, params.runID)).run;
+
+      const sandboxRoot = resolvePath(run.workspacePath);
+      const targetRoot = resolvePath(run.workspaceTargetPath || config.repoRoot);
+      if (!sandboxRoot) throw new HttpError(400, 'No sandbox workspace path on this run');
+
+      const sandboxFile = resolvePath(sandboxRoot, filePath);
+      const targetFile = resolvePath(targetRoot, filePath);
+
+      if (!sandboxFile.startsWith(sandboxRoot) || sandboxFile === sandboxRoot) {
+        throw new HttpError(400, 'Path escapes sandbox');
+      }
+      if (!targetFile.startsWith(targetRoot) || targetFile === targetRoot) {
+        throw new HttpError(400, 'Path escapes target');
+      }
+
+      const normalizedTarget = relative(targetRoot, targetFile).split('\\').join('/');
+      const protectedPatterns = [
+        /^\.git(?:\/|$)/,
+        /^node_modules(?:\/|$)/,
+        /^token$/,
+        /^ChatBotHost\/data(?:\/|$)/,
+        /^ChatBotHost\/workspaces(?:\/|$)/,
+        /(?:^|\/)\.env(?:\.|$)/,
+      ];
+      if (protectedPatterns.some((p) => p.test(normalizedTarget))) {
+        throw new HttpError(400, 'Protected target path is not allowed');
+      }
+
+      await mkdir(dirname(targetFile), { recursive: true });
+      await copyFile(sandboxFile, targetFile);
+      const info = await fsStat(targetFile);
+
+      return { applied: true, path: normalizedTarget, bytes: info.size };
+    },
+  },
+  {
     method: 'PATCH',
     pattern: /^\/my\/agents\/(?<userAgentID>[^/]+)$/,
     handler: async ({ params, body }) => {
@@ -805,6 +856,7 @@ server.listen(config.port, () => {
   log.info(`IM 服务器: ${config.imServerBaseURL}`);
   log.info(`存储目录: ${config.storageDir}`);
   log.info(`工作区根目录: ${config.workspaceRoot}`);
+  log.info(`工作区模式: ${config.workspaceMode}`);
   log.info(`agent/runs 等数据保存在: ${store.storageDir}`);
 });
 
