@@ -14,5 +14,9 @@ storageDir: ./data
 # Workspace sandbox root (env: CHATBOT_HOST_WORKSPACE_ROOT)
 workspaceRoot: ./workspaces
 
+# Workspace mode: "auto" (server auto-creates) or "manual" (local client selects)
+# (env: CHATBOT_HOST_WORKSPACE_MODE)
+workspaceMode: auto
+
 # Repository root (env: CHATBOT_HOST_REPO_ROOT)
 repoRoot: .

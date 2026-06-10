@@ -18,6 +18,9 @@ export async function listWorkspaces({ store, ownerUserID }) {
 }
 
 export async function createWorkspace({ store, config, ownerUserID, name, targetPath }) {
+  if (!targetPath) {
+    return createEmptyWorkspace({ store, config, ownerUserID, name });
+  }
   const resolvedTargetPath = await validateWorkspacePath(targetPath);
   const now = Date.now();
   const workspace = {
@@ -42,6 +45,31 @@ export async function createWorkspace({ store, config, ownerUserID, name, target
   workspaces.push(workspace);
   await store.writeCollection('workspaces', workspaces);
   log.info(`工作区创建完成: ${workspace.workspaceID}, 总工作区数: ${workspaces.length}`);
+  return workspace;
+}
+
+export async function createEmptyWorkspace({ store, config, ownerUserID, name }) {
+  const now = Date.now();
+  const workspaceID = `ws_${randomUUID()}`;
+  const sandboxPath = resolve(config.workspaceRoot, workspaceID);
+  const workspace = {
+    workspaceID,
+    ownerUserID,
+    name: name?.trim() || 'auto-workspace',
+    targetPath: sandboxPath,
+    sandboxPath,
+    status: 'active',
+    createTime: now,
+    updateTime: now,
+  };
+
+  log.info(`创建空工作区: id=${workspace.workspaceID}, name=${workspace.name}, sandbox=${workspace.sandboxPath}`);
+  await mkdir(workspace.sandboxPath, { recursive: true });
+
+  const workspaces = await store.readCollection('workspaces');
+  workspaces.push(workspace);
+  await store.writeCollection('workspaces', workspaces);
+  log.info(`空工作区创建完成: ${workspace.workspaceID}, 总工作区数: ${workspaces.length}`);
   return workspace;
 }
 
@@ -97,6 +125,14 @@ export async function getConversationWorkspace({ store, config, ownerUserID, con
     log.info(`查询会话工作区: conversation=${conversationID} -> workspace=${workspace.workspaceID}`);
     return { binding, workspace };
   }
+  if (autoCreate) {
+    log.info(`自动创建工作区绑定: conversation=${conversationID}`);
+    const workspace = await createEmptyWorkspace({ store, config, ownerUserID });
+    await bindConversationWorkspace({ store, config, ownerUserID, conversationID, workspaceID: workspace.workspaceID });
+    const bindingsUpdated = await store.readCollection('conversation-workspaces');
+    const newBinding = bindingsUpdated.find((item) => item.ownerUserID === ownerUserID && item.conversationID === conversationID);
+    return { binding: newBinding || null, workspace };
+  }
   log.info(`会话无工作区绑定: conversation=${conversationID}`);
   return { binding: null, workspace: null };
 }
@@ -114,12 +150,13 @@ export async function requireWorkspace({ store, config, ownerUserID, workspaceID
 }
 
 export async function resolveEventWorkspace({ store, config, event, ownerUserID }) {
+  const autoCreate = config.workspaceMode !== 'manual';
   const { workspace } = await getConversationWorkspace({
     store,
     config,
     ownerUserID,
     conversationID: event.conversationID,
-    autoCreate: false,
+    autoCreate,
   });
   if (!workspace) {
     log.info(`事件无工作区: conversation=${event.conversationID}`);

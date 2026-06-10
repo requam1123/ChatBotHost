@@ -17,6 +17,7 @@ export function loadConfig() {
     imServerWSURL: resolve('IM_SERVER_WS_URL', 'imServerWSURL', 'ws://localhost:3000'),
     storageDir: resolve('CHATBOT_HOST_STORAGE_DIR', 'storageDir', join(__dirname, '..', 'data')),
     workspaceRoot: resolve('CHATBOT_HOST_WORKSPACE_ROOT', 'workspaceRoot', join(__dirname, '..', 'workspaces')),
+    workspaceMode: resolve('CHATBOT_HOST_WORKSPACE_MODE', 'workspaceMode', 'auto'),
     repoRoot: resolve('CHATBOT_HOST_REPO_ROOT', 'repoRoot', join(__dirname, '..')),
   };
 }
